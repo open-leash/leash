@@ -27,9 +27,13 @@ test("the configured local service token survives setup and install resets", asy
     server.updateSettings("openai", undefined, undefined, true);
     assert.equal(server.islandActivityOnly, true);
     assert.equal(server.islandVisibility, "activity");
+    server.addExcludedProjectPath("/Users/max/Code/OL2");
+    assert.deepEqual(server.excludedProjectPaths, ["/Users/max/Code/OL2"]);
+    assert.equal(server.isProjectExcluded("/Users/max/Code/OL2/leash"), true);
     server.resetSetup();
     assert.equal(server.islandActivityOnly, true, "setup reset should preserve the Island visibility preference");
     assert.equal(server.islandVisibility, "activity");
+    assert.deepEqual(server.excludedProjectPaths, ["/Users/max/Code/OL2"], "setup reset should preserve project exclusions");
 
     server.completeSetup(server.policies, {
       clientMode: "cloud",
@@ -51,6 +55,7 @@ test("the configured local service token survives setup and install resets", asy
     assert.equal(server.token, configuredToken);
     assert.equal(server.islandActivityOnly, false, "a full settings reset should restore always-on Island visibility");
     assert.equal(server.islandVisibility, "always");
+    assert.deepEqual(server.excludedProjectPaths, [], "a full settings reset should clear project exclusions");
   } finally {
     await server.stop();
     fs.rmSync(dataDir, { recursive: true, force: true });

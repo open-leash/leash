@@ -1,6 +1,6 @@
 {
   "name": "@openleash/desktop-client",
-  "version": "0.37.8",
+  "version": "0.37.9",
   "description": "Leash desktop agent policy and attention client.",
   "author": "Leash",
   "repository": {
@@ -21,7 +21,7 @@
     "build": "tsc -p tsconfig.json && node src/copy-assets.mjs && node src/build-native-island.mjs && node scripts/build-local-proxy.mjs",
     "build:local-proxy": "node scripts/build-local-proxy.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/proxy-manager.test.ts src/agent-registry.test.ts src/activity-island.test.ts src/agent-session-focus.test.ts src/agent-restart.test.ts src/notice-window.test.ts src/intent-dedupe.test.ts src/notice-presentation.test.ts src/notification-baseline.test.ts src/event-decision-controls.test.ts src/install-state.test.ts src/startup-visibility.test.ts src/protection-install-lifecycle.test.ts src/local-server-token.test.ts src/setup-connection-draft.test.ts src/setup-install-progress.test.ts src/setup-island-choice.test.ts src/setup-audience-flow.test.ts src/feature-presentation.test.ts src/plugin-detail-edit-refresh.test.ts src/plugin-install-state.test.ts src/session-monitoring.test.ts src/instruction-rules.test.ts src/policy-defaults.test.ts",
+    "test": "tsx --test src/proxy-manager.test.ts src/agent-registry.test.ts src/activity-island.test.ts src/agent-session-focus.test.ts src/agent-restart.test.ts src/notice-window.test.ts src/intent-dedupe.test.ts src/notice-presentation.test.ts src/notification-baseline.test.ts src/event-decision-controls.test.ts src/install-state.test.ts src/startup-visibility.test.ts src/protection-install-lifecycle.test.ts src/local-server-token.test.ts src/setup-connection-draft.test.ts src/setup-install-progress.test.ts src/setup-island-choice.test.ts src/setup-audience-flow.test.ts src/feature-presentation.test.ts src/plugin-detail-edit-refresh.test.ts src/plugin-install-state.test.ts src/session-monitoring.test.ts src/project-exclusions.test.ts src/instruction-rules.test.ts src/policy-defaults.test.ts",
     "test:island:mac": "node scripts/verify-native-island.mjs --plain && node scripts/verify-native-island.mjs --notch",
     "verify:release-dependencies": "node scripts/verify-release-dependencies.mjs"
   },

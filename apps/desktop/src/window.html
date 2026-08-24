@@ -1682,6 +1682,32 @@
         gap: 12px;
         align-items: center;
       }
+      .excludedProjectList {
+        display: grid;
+        gap: 9px;
+        margin-top: 18px;
+      }
+      .excludedProjectRow {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--soft);
+        padding: 11px 12px 11px 14px;
+      }
+      .excludedProjectRow code {
+        overflow: hidden;
+        color: var(--ink-2);
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .excludedProjectRow button {
+        min-height: 34px;
+        padding: 7px 12px;
+      }
       .toggleRow {
         display: inline-flex;
         align-items: center;
@@ -3678,7 +3704,7 @@
       <main id="root"></main>
     </div>
     <script>
-      let state = { rules: [], history: [], localProtections: [], setupComplete: false, introSeen: false };
+      let state = { rules: [], history: [], localProtections: [], excludedProjectPaths: [], setupComplete: false, introSeen: false };
       let selectedAgents;
       let selectedRules;
       let selectedPlugins;
@@ -6721,6 +6747,24 @@
             <div class="card">
               <div class="fieldRow">
                 <div>
+                  <strong>Projects Leash leaves alone</strong>
+                  <p>Excluded projects and every folder inside them bypass Leash evaluation, recording, notifications, and tool gating on this Mac.</p>
+                </div>
+                <button class="secondary" id="addExcludedProject">Add project</button>
+              </div>
+              <div class="excludedProjectList">
+                ${(state.excludedProjectPaths || []).map((projectPath) => `
+                  <div class="excludedProjectRow" title="${escapeHtml(projectPath)}">
+                    <code>${escapeHtml(projectPath)}</code>
+                    <button class="secondary dangerButton" data-remove-excluded-project="${escapeHtml(projectPath)}">Remove</button>
+                  </div>
+                `).join("") || `<div class="empty">No excluded projects. Leash protects every detected project.</div>`}
+              </div>
+              <p class="notice">Full-proxy traffic still passes through the local Leash process, but Leash forwards it unchanged whenever the agent reports an excluded working directory.</p>
+            </div>
+            <div class="card">
+              <div class="fieldRow">
+                <div>
                   <strong>Notification sounds</strong>
                   <p>Play sounds when an approval, question, or plan needs your answer, and when a protected agent finishes.</p>
                 </div>
@@ -6766,6 +6810,14 @@
                   </div>
                   <button class="secondary dangerButton" id="deleteDataAndSettings">Delete data and settings</button>
                 </div>
+                <div class="dangerRow">
+                  <div>
+                    <strong>Uninstall Leash</strong>
+                    <p>Restore every managed agent configuration, remove Leash hooks and proxy settings, stop and delete the local Open Source runtime if present, and remove this app and its local data. Docker Desktop itself stays installed.</p>
+                  </div>
+                  <button class="secondary dangerButton" id="uninstallApplication">Uninstall Leash</button>
+                </div>
+                <div id="uninstallMessage" class="notice"></div>
               </div>
             </div>
           </div>
@@ -6794,6 +6846,22 @@
               return;
             }
             state.proxyStatus = result;
+          };
+        });
+        document.getElementById("addExcludedProject").onclick = async () => {
+          const result = await window.openleash.chooseExcludedProject();
+          if (!result?.ok) return;
+          state.excludedProjectPaths = result.excludedProjectPaths || [];
+          renderSettings();
+        };
+        root.querySelectorAll("[data-remove-excluded-project]").forEach((button) => {
+          button.onclick = async () => {
+            const result = await window.openleash.removeExcludedProject({
+              projectPath: button.dataset.removeExcludedProject
+            });
+            if (!result?.ok) return;
+            state.excludedProjectPaths = result.excludedProjectPaths || [];
+            renderSettings();
           };
         });
         const agentDoneSoundInput = document.getElementById("agentDoneSound");
@@ -6869,6 +6937,22 @@
         document.getElementById("deleteDataAndSettings").onclick = async () => {
           const result = await window.openleash.deleteDataAndSettings();
           if (result?.restarting) document.getElementById("settingsMessage").textContent = "Deleting data and settings and restarting Leash...";
+        };
+        document.getElementById("uninstallApplication").onclick = async () => {
+          const button = document.getElementById("uninstallApplication");
+          const message = document.getElementById("uninstallMessage");
+          button.disabled = true;
+          message.textContent = "Preparing a complete Leash uninstall…";
+          const result = await window.openleash.uninstallApplication().catch((error) => ({
+            ok: false,
+            error: error?.message || "Could not uninstall Leash."
+          }));
+          if (result?.uninstalling) {
+            message.textContent = "Removing Leash. This window will close automatically…";
+            return;
+          }
+          button.disabled = false;
+          message.textContent = result?.canceled ? "" : result?.error || "Could not uninstall Leash.";
         };
       }
 

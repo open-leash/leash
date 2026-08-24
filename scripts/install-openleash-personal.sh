@@ -371,9 +371,20 @@ uninstall_openleash() {
   fi
 
   if [[ -f "$OPENLEASH_BACKEND_DIR/docker-compose.yml" ]]; then
+    command -v docker >/dev/null 2>&1 ||
+      die "Docker is required to remove the installed Personal Open Source runtime. Start Docker Desktop, then retry."
+    docker info >/dev/null 2>&1 ||
+      die "Start Docker Desktop so Leash can remove its Personal Open Source containers and data, then retry."
     local compose
+    local leash_images
     compose="$(docker_compose_cmd)"
+    leash_images="$(cd "$OPENLEASH_BACKEND_DIR" && $compose --profile setup config --images 2>/dev/null | grep -E '/client-api(:|@)' | sort -u || true)"
     (cd "$OPENLEASH_BACKEND_DIR" && $compose down -v --remove-orphans)
+    if [[ -n "$leash_images" ]]; then
+      while IFS= read -r image; do
+        [[ -n "$image" ]] && docker image rm -f "$image" >/dev/null 2>&1 || true
+      done <<<"$leash_images"
+    fi
   fi
   remove_retired_feature_containers
 
@@ -383,8 +394,25 @@ uninstall_openleash() {
     "$HOME/.openleash" \
     "$HOME/Library/Application Support/OpenLeash" \
     "$HOME/Library/Application Support/Leash" \
+    "$HOME/Library/Application Support/com.openleash.personal" \
+    "$HOME/Library/Caches/Leash" \
+    "$HOME/Library/Caches/com.openleash.personal" \
+    "$HOME/Library/Caches/leash-island" \
+    "$HOME/Library/Caches/openleash-island" \
+    "$HOME/Library/HTTPStorages/com.openleash.personal" \
+    "$HOME/Library/Logs/Leash" \
     "$HOME/Library/Logs/OpenLeash" \
-    "$HOME/Library/Saved Application State/com.openleash.personal.savedState"
+    "$HOME/Library/Saved Application State/com.openleash.personal.savedState" \
+    "$HOME/Library/Saved Application State/com.openleash.openleash.savedState" \
+    "$HOME/Library/WebKit/com.openleash.personal" \
+    "$HOME/Library/WebKit/leash-island" \
+    "$HOME/Library/WebKit/openleash-island"
+  rm -f \
+    "$HOME/Library/Preferences/com.openleash.personal.plist" \
+    "$HOME/Library/LaunchAgents/com.openleash.personal.plist" \
+    "$HOME/Library/LaunchAgents/com.openleash.installer-launch.plist" \
+    "$HOME/Library/LaunchAgents/com.openleash.local-release-launch.plist" \
+    "$HOME/Library/LaunchAgents/com.leash.personal.plist"
   rm -f /tmp/openleash-launch.log /tmp/openleash-startup.log
   log "Leash uninstalled. Agent hooks and proxy configuration were restored."
 }

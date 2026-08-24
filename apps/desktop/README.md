@@ -77,6 +77,13 @@ permitted settings. Overview leads with the current device and relative sync
 state. Agent enablement lives on Agents. Business roles never unlock employee,
 cost, identity, billing, or organization-policy administration in Desktop.
 
+Settings can also exclude explicit project folders on one Mac. Exclusions are
+stored in Leash's local application data, apply to every nested folder, and
+bypass evaluation, history, notifications, and tool gating before an event is
+forwarded to the configured Engine. Full-proxy provider traffic still transits
+the local Leash process, but it is forwarded unchanged when the agent reports
+an excluded working directory.
+
 ---
 
 ## 🛠 Run locally

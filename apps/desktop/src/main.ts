@@ -109,6 +109,7 @@ import {
 import { shouldLaunchInBackground } from "./startup-visibility";
 
 const APP_DISPLAY_NAME = app.isPackaged ? "Leash" : "Leash (Dev)";
+const MAC_TRAY_GUID = "2d6829c5-f65f-4c6a-bf91-4fc686a14f0e";
 let proxyStatus: LocalProxyStatus = {
   runtimeAvailable: false,
   installed: false,
@@ -997,6 +998,7 @@ ipcMain.handle("openleash:list", () => ({
   agentDoneSound: localServer?.agentDoneSound ?? true,
   islandVisibility: localServer?.islandVisibility ?? "always",
   islandActivityOnly: localServer?.islandActivityOnly ?? false,
+  excludedProjectPaths: localServer?.excludedProjectPaths ?? [],
   promptTransforms: localServer?.promptTransforms,
   plugins:
     latestPlugins.length > 0 ? latestPlugins : (localServer?.plugins ?? []),
@@ -2007,6 +2009,30 @@ ipcMain.handle(
     };
   },
 );
+ipcMain.handle("openleash:choose-excluded-project", async () => {
+  const options: OpenDialogOptions = {
+    title: "Choose a project Leash should leave alone",
+    buttonLabel: "Exclude project",
+    properties: ["openDirectory"],
+  };
+  const selection = window
+    ? await dialog.showOpenDialog(window, options)
+    : await dialog.showOpenDialog(options);
+  if (selection.canceled || !selection.filePaths[0]) {
+    return { ok: false, canceled: true, excludedProjectPaths: localServer.excludedProjectPaths };
+  }
+  return {
+    ok: true,
+    excludedProjectPaths: localServer.addExcludedProjectPath(selection.filePaths[0]),
+  };
+});
+ipcMain.handle(
+  "openleash:remove-excluded-project",
+  (_event, payload: { projectPath?: string }) => ({
+    ok: true,
+    excludedProjectPaths: localServer.removeExcludedProjectPath(payload?.projectPath ?? ""),
+  }),
+);
 ipcMain.handle(
   "openleash:save-prompt-transforms",
   (_event, payload: { config?: unknown }) => {
@@ -2086,6 +2112,66 @@ ipcMain.handle("openleash:disconnect-client", async () => {
     return {
       ok: false,
       error: `Could not completely disconnect this Mac: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+});
+ipcMain.handle("openleash:uninstall-application", async () => {
+  if (process.platform !== "darwin") {
+    return {
+      ok: false,
+      error: "Complete in-app uninstall is currently available on macOS.",
+    };
+  }
+  if (!app.isPackaged) {
+    return {
+      ok: false,
+      error: "Complete uninstall is available from the installed Leash app, not a development build.",
+    };
+  }
+  const options: MessageBoxOptions = {
+    type: "warning",
+    buttons: ["Uninstall Leash", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    title: "Uninstall Leash?",
+    message: "Completely remove Leash from this Mac?",
+    detail:
+      "Leash will restore every managed agent configuration, remove its hooks and proxy settings, unregister startup, delete its local Open Source Docker containers and data if present, remove local Leash data, and delete the app. Docker Desktop itself will not be removed.",
+  };
+  const choice = window
+    ? await dialog.showMessageBox(window, options)
+    : await dialog.showMessageBox(options);
+  if (choice.response !== 0) return { ok: false, canceled: true };
+
+  const runtimeDir = individualOpenSourceRuntimeDirectory();
+  if (fs.existsSync(path.join(runtimeDir, "docker-compose.yml"))) {
+    const docker = spawnSync("docker", ["info"], {
+      encoding: "utf8",
+      timeout: 8000,
+    });
+    if (docker.status !== 0) {
+      return {
+        ok: false,
+        error:
+          "Start Docker Desktop, then try again so Leash can remove its local containers and data cleanly.",
+      };
+    }
+  }
+
+  const cleanup = await cleanupDesktopIntegrations();
+  if (!cleanup.ok) {
+    return {
+      ok: false,
+      error: `Leash did not uninstall because cleanup was incomplete: ${cleanup.errors.join("; ")}`,
+    };
+  }
+  try {
+    startCompleteMacUninstall(runtimeDir);
+    return { ok: true, uninstalling: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Could not start the Leash uninstaller: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 });
@@ -3995,6 +4081,50 @@ function installerScriptPath() {
       );
 }
 
+function individualOpenSourceRuntimeDirectory() {
+  return path.join(os.homedir(), ".openleash", "individual-open-source");
+}
+
+function startCompleteMacUninstall(runtimeDir: string) {
+  const installer = installerScriptPath();
+  if (!fs.existsSync(installer)) throw new Error("The bundled uninstall helper is missing.");
+  const bundleMarker = `${path.sep}Contents${path.sep}MacOS${path.sep}`;
+  const markerIndex = process.execPath.lastIndexOf(bundleMarker);
+  if (markerIndex < 0) throw new Error("The installed Leash application path could not be determined.");
+  const applicationBundle = process.execPath.slice(0, markerIndex);
+  const installDirectory = path.dirname(applicationBundle);
+  const helperDirectory = fs.mkdtempSync(path.join(app.getPath("temp"), "leash-uninstall-"));
+  const helper = path.join(helperDirectory, "uninstall.sh");
+  fs.copyFileSync(installer, helper);
+  fs.chmodSync(helper, 0o700);
+  const logPath = path.join(app.getPath("temp"), "leash-uninstall.log");
+  const log = fs.openSync(logPath, "a");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    OPENLEASH_BACKEND_DIR: runtimeDir,
+  };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const child = spawn(
+    "/bin/bash",
+    [helper, "--uninstall", "--target", installDirectory, "--quiet"],
+    {
+      detached: true,
+      env,
+      stdio: ["ignore", log, log],
+    },
+  );
+  fs.closeSync(log);
+  if (!child.pid) throw new Error("The uninstall helper did not start.");
+  child.unref();
+  setTimeout(() => {
+    quitting = true;
+    noticeWindow?.destroy();
+    window?.destroy();
+    tray?.destroy();
+    app.quit();
+  }, 500);
+}
+
 function readUpdateState(): UpdateState {
   const file = updateStatePath();
   try {
@@ -4045,7 +4175,10 @@ function setDisconnected() {
 function ensureTray(status: "ok" | "pending" | "down" = currentTrayStatus) {
   currentTrayStatus = status;
   if (!tray || tray.isDestroyed()) {
-    tray = new Tray(createTrayIcon(status));
+    const image = createTrayIcon(status);
+    tray = process.platform === "darwin"
+      ? new Tray(image, MAC_TRAY_GUID)
+      : new Tray(image);
     tray.on("click", () => {
       if (traySingleClickTimer) clearTimeout(traySingleClickTimer);
       traySingleClickTimer = setTimeout(() => {

@@ -25,6 +25,10 @@ import {
   SessionMonitoringPauses,
   type SessionMonitoringPause,
 } from "./session-monitoring";
+import {
+  normalizeExcludedProjectPaths,
+  projectPathIsExcluded,
+} from "./project-exclusions";
 
 const ACTION_PURPOSE_CONTEXT_MESSAGES = Number(process.env.OPENLEASH_ACTION_PURPOSE_MESSAGES ?? 5);
 type ClientMode = "personal" | "cloud" | "custom";
@@ -249,6 +253,7 @@ type Store = {
   agentDoneSound?: boolean;
   islandVisibility?: IslandVisibility;
   islandActivityOnly?: boolean;
+  excludedProjectPaths: string[];
   clientMode?: ClientMode;
   remoteApiUrl?: string;
   remoteToken?: string;
@@ -358,6 +363,7 @@ export class LocalOpenLeashServer {
   private store!: Store;
   private pluginRuntimeStatuses: Array<{ pluginId: string; healthy: boolean; error?: string }> = [];
   private readonly sessionMonitoringPauses = new SessionMonitoringPauses();
+  private readonly excludedProjectSessions = new Map<string, number>();
 
   constructor(private readonly dir: string, private readonly options: LocalServerOptions = {}) {
     fs.mkdirSync(dir, { recursive: true });
@@ -434,6 +440,10 @@ export class LocalOpenLeashServer {
     return this.store.promptTransforms;
   }
 
+  get excludedProjectPaths() {
+    return [...this.store.excludedProjectPaths];
+  }
+
   get clientMode() {
     return this.store.clientMode === "custom" ? "custom" : "cloud";
   }
@@ -490,6 +500,7 @@ export class LocalOpenLeashServer {
       introSeen,
       agentDoneSound: this.store?.agentDoneSound ?? true,
       islandVisibility: this.islandVisibility,
+      excludedProjectPaths: this.store?.excludedProjectPaths ?? [],
       clientMode: initialClientMode(),
       promptTransforms: this.store?.promptTransforms ?? defaultPromptTransformConfig,
       plugins: bundledPluginCatalog(),
@@ -506,6 +517,7 @@ export class LocalOpenLeashServer {
       introSeen: false,
       agentDoneSound: true,
       islandVisibility: "always",
+      excludedProjectPaths: [],
       clientMode: initialClientMode(),
       promptTransforms: defaultPromptTransformConfig,
       plugins: bundledPluginCatalog(),
@@ -627,6 +639,43 @@ export class LocalOpenLeashServer {
     this.writeStore();
   }
 
+  addExcludedProjectPath(projectPath: string) {
+    this.store.excludedProjectPaths = normalizeExcludedProjectPaths([
+      ...this.store.excludedProjectPaths,
+      projectPath,
+    ]);
+    this.writeStore();
+    return this.excludedProjectPaths;
+  }
+
+  removeExcludedProjectPath(projectPath: string) {
+    const normalizedTarget = normalizeExcludedProjectPaths([projectPath])[0];
+    this.store.excludedProjectPaths = this.store.excludedProjectPaths.filter(
+      (candidate) => normalizeExcludedProjectPaths([candidate])[0] !== normalizedTarget,
+    );
+    this.writeStore();
+    return this.excludedProjectPaths;
+  }
+
+  isProjectExcluded(projectPath: unknown) {
+    return projectPathIsExcluded(projectPath, this.store.excludedProjectPaths);
+  }
+
+  private isMonitoringExcluded(agentKind: unknown, sessionId: unknown, projectPath?: unknown) {
+    const kind = String(agentKind ?? "").trim();
+    const session = String(sessionId ?? "").trim();
+    const key = kind && session ? `${kind}:${session}` : "";
+    const now = Date.now();
+    for (const [candidate, expiresAt] of this.excludedProjectSessions) {
+      if (expiresAt <= now) this.excludedProjectSessions.delete(candidate);
+    }
+    if (this.isProjectExcluded(projectPath)) {
+      if (key) this.excludedProjectSessions.set(key, now + 24 * 60 * 60_000);
+      return true;
+    }
+    return Boolean(key && (this.excludedProjectSessions.get(key) ?? 0) > now);
+  }
+
   get plugins() {
     return this.store.plugins;
   }
@@ -734,6 +783,7 @@ export class LocalOpenLeashServer {
           clientMode: this.clientMode,
           agentDoneSound: this.agentDoneSound,
           islandVisibility: this.islandVisibility,
+          excludedProjectPaths: this.excludedProjectPaths,
           remoteApiUrl: this.store.remoteApiUrl,
           remoteOrganization: this.store.remoteOrganization,
           remoteUser: this.store.remoteUser,
@@ -758,6 +808,9 @@ export class LocalOpenLeashServer {
       }
       if (req.method === "POST" && req.url === "/v1/evaluate") {
         const request = await readJson(req) as EvaluationRequest;
+        if (this.isMonitoringExcluded(request.agent?.kind, request.event?.sessionId, request.event?.projectPath)) {
+          return json(res, projectExcludedDecision());
+        }
         const pause = this.sessionMonitoringPause(
           request.agent?.kind ?? request.event?.agentKind,
           request.event?.sessionId,
@@ -778,6 +831,16 @@ export class LocalOpenLeashServer {
         };
         if (!body.requestBody || typeof body.requestBody !== "object" || Array.isArray(body.requestBody)) {
           return json(res, { error: "requestBody must be a JSON object" }, 400);
+        }
+        if (this.isMonitoringExcluded(body.agentKind, body.sessionId, body.projectPath)) {
+          return json(res, {
+            protocol: "openleash-container-plugin.v1",
+            requestBody: body.requestBody,
+            appliedPluginIds: [],
+            runs: [],
+            monitoringPaused: true,
+            projectExcluded: true,
+          });
         }
         const pause = this.sessionMonitoringPause(body.agentKind ?? "unknown", body.sessionId);
         if (pause) {
@@ -814,6 +877,9 @@ export class LocalOpenLeashServer {
       if (req.method === "POST" && req.url === "/v1/agent-events") {
         const body = await readJson(req);
         const scope = agentEventScope(body);
+        if (this.isMonitoringExcluded(scope.agentKind, scope.sessionId, scope.projectPath)) {
+          return json(res, projectExcludedDecision());
+        }
         const pause = this.sessionMonitoringPause(scope.agentKind, scope.sessionId);
         if (pause) return json(res, monitoringPausedDecision(pause));
         this.notifyAgentActivity((body as { request?: unknown })?.request);
@@ -823,6 +889,13 @@ export class LocalOpenLeashServer {
       if (req.method === "POST" && hookMatch) {
         const body = await readJson(req);
         const request = normalizeHookRequest(hookMatch[1], hookMatch[2], body, req.url ?? "");
+        if (this.isMonitoringExcluded(request.agent.kind, request.event.sessionId, request.event.projectPath)) {
+          return json(res, nativeHookDecision(
+            hookMatch[1],
+            hookMatch[2],
+            projectExcludedDecision(),
+          ));
+        }
         const pause = this.sessionMonitoringPause(request.agent.kind, request.event.sessionId);
         if (pause) {
           return json(res, nativeHookDecision(
@@ -1321,6 +1394,9 @@ export class LocalOpenLeashServer {
         this.settingValue("islandVisibility"),
         this.getSetting("islandActivityOnly") === "true",
       ),
+      excludedProjectPaths: normalizeExcludedProjectPaths(
+        parseJson<unknown>(this.settingValue("excludedProjectPaths") ?? null, []),
+      ),
       clientMode: normalizeClientMode(this.settingValue<ClientMode>("clientMode") ?? initialClientMode()),
       remoteApiUrl: configuredRemoteApiUrl,
       remoteToken,
@@ -1451,6 +1527,7 @@ export class LocalOpenLeashServer {
       insertSetting.run("agentDoneSound", String(Boolean(store.agentDoneSound)));
       insertSetting.run("islandVisibility", normalizeIslandVisibility(store.islandVisibility, Boolean(store.islandActivityOnly)));
       insertSetting.run("islandActivityOnly", String(normalizeIslandVisibility(store.islandVisibility, Boolean(store.islandActivityOnly)) === "activity"));
+      insertSetting.run("excludedProjectPaths", JSON.stringify(normalizeExcludedProjectPaths(store.excludedProjectPaths)));
       if (store.clientMode) insertSetting.run("clientMode", store.clientMode);
       if (store.remoteApiUrl) insertSetting.run("remoteApiUrl", store.remoteApiUrl);
       if (store.remoteToken) insertSetting.run("remoteToken", store.remoteToken);
@@ -1836,6 +1913,7 @@ export class LocalOpenLeashServer {
           parsed.islandVisibility,
           Boolean(parsed.islandActivityOnly),
         ),
+        excludedProjectPaths: normalizeExcludedProjectPaths(parsed.excludedProjectPaths),
         remoteApiUrl: parsed.remoteApiUrl,
         remoteToken: parsed.remoteToken,
         remoteOrganization: parsed.remoteOrganization,
@@ -2760,13 +2838,25 @@ function monitoringPausedDecision(pause: SessionMonitoringPause) {
   };
 }
 
+function projectExcludedDecision() {
+  return {
+    decision: "allow" as const,
+    decisionId: "",
+    summary: "This project is excluded from Leash monitoring.",
+    results: [],
+    monitoringPaused: true,
+    projectExcluded: true,
+  };
+}
+
 function agentEventScope(value: unknown) {
   const body = value && typeof value === "object"
-    ? value as { request?: { agent?: { kind?: unknown }; event?: { agentKind?: unknown; sessionId?: unknown } } }
+    ? value as { request?: { agent?: { kind?: unknown }; event?: { agentKind?: unknown; sessionId?: unknown; projectPath?: unknown } } }
     : undefined;
   return {
     agentKind: String(body?.request?.agent?.kind ?? body?.request?.event?.agentKind ?? ""),
     sessionId: String(body?.request?.event?.sessionId ?? ""),
+    projectPath: body?.request?.event?.projectPath,
   };
 }
 

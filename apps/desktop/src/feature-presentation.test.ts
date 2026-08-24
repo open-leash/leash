@@ -7,6 +7,7 @@ const renderer = readFileSync(path.join(__dirname, "window.html"), "utf8");
 const desktopMain = readFileSync(path.join(__dirname, "main.ts"), "utf8");
 const preload = readFileSync(path.join(__dirname, "preload.ts"), "utf8");
 const copyAssets = readFileSync(path.join(__dirname, "copy-assets.mjs"), "utf8");
+const installer = readFileSync(path.join(__dirname, "../../../scripts/install-openleash-personal.sh"), "utf8");
 const canonicalPresentations = JSON.parse(
   readFileSync(path.join(__dirname, "../../../packages/shared/feature-presentations.json"), "utf8"),
 ) as Array<{ id: string; slug: string; name: string; description: string }>;
@@ -69,10 +70,13 @@ test("desktop groups built-in Features into plain-language Safety and Cost contr
   assert.doesNotMatch(renderer, /\{ id: "security", label: "Security"/);
 });
 
-test("desktop tray icon has transparent rounded corners", () => {
+test("macOS tray keeps the original colored Leash icon with stable placement", () => {
+  assert.match(copyAssets, /openleash-icon\.png/);
+  assert.match(copyAssets, /tray-icon\.png/);
   assert.match(copyAssets, /const trayIconCornerRadius = 14/);
-  assert.match(copyAssets, /\.ensureAlpha\(\)/);
-  assert.match(copyAssets, /blend: "dest-in"/);
+  assert.match(desktopMain, /image\.setTemplateImage\(false\)/);
+  assert.doesNotMatch(desktopMain, /image\.setTemplateImage\(true\)/);
+  assert.match(desktopMain, /new Tray\(image, MAC_TRAY_GUID\)/);
 });
 
 test("desktop navigation remains reachable in short windows", () => {
@@ -81,6 +85,17 @@ test("desktop navigation remains reachable in short windows", () => {
   assert.match(renderer, /overscroll-behavior: contain/);
   assert.match(renderer, /nav button\.navPlugin \.navLabel\s*\{[\s\S]*?white-space: normal;/);
   assert.match(renderer, /\.foot\s*\{[\s\S]*?flex: 0 0 auto;/);
+});
+
+test("Settings can exclude a project from local monitoring without weakening other projects", () => {
+  assert.match(renderer, /Projects Leash leaves alone/);
+  assert.match(renderer, /id="addExcludedProject">Add project<\/button>/);
+  assert.match(renderer, /data-remove-excluded-project/);
+  assert.match(renderer, /window\.openleash\.chooseExcludedProject\(\)/);
+  assert.match(renderer, /window\.openleash\.removeExcludedProject/);
+  assert.match(preload, /chooseExcludedProject: \(\) => ipcRenderer\.invoke\("openleash:choose-excluded-project"\)/);
+  assert.match(desktopMain, /localServer\.addExcludedProjectPath/);
+  assert.match(desktopMain, /localServer\.removeExcludedProjectPath/);
 });
 
 test("Settings can fully disconnect this Mac and return to setup", () => {
@@ -96,6 +111,26 @@ test("Settings can fully disconnect this Mac and return to setup", () => {
   assert.match(disconnectHandler, /desktopAuthSession = undefined/);
   assert.match(disconnectHandler, /relaunchOpenLeash\(\)/);
   assert.match(desktopMain, /openAtLogin: localServer\.setupComplete/);
+});
+
+test("Settings can completely uninstall Leash and its local runtime on macOS", () => {
+  assert.match(renderer, /id="uninstallApplication">Uninstall Leash<\/button>/);
+  assert.match(renderer, /window\.openleash\.uninstallApplication\(\)/);
+  assert.match(preload, /uninstallApplication: \(\) => ipcRenderer\.invoke\("openleash:uninstall-application"\)/);
+  const uninstallHandler = desktopMain.slice(
+    desktopMain.indexOf('ipcMain.handle("openleash:uninstall-application"'),
+    desktopMain.indexOf('ipcMain.handle("openleash:delete-data-and-settings"'),
+  );
+  assert.match(uninstallHandler, /await cleanupDesktopIntegrations\(\)/);
+  assert.match(uninstallHandler, /startCompleteMacUninstall\(runtimeDir\)/);
+  assert.match(desktopMain, /\[helper, "--uninstall", "--target", installDirectory, "--quiet"\]/);
+  assert.match(installer, /uninstallAllAgentProtections\(\)/);
+  assert.match(installer, /uninstallLocalProxy\(\)/);
+  assert.match(installer, /compose down -v --remove-orphans/);
+  assert.match(installer, /docker image rm -f/);
+  assert.match(installer, /Application Support\/Leash/);
+  assert.match(installer, /Preferences\/com\.openleash\.personal\.plist/);
+  assert.match(installer, /HTTPStorages\/com\.openleash\.personal/);
 });
 
 test("desktop Overview focuses on monitored activity and Agents owns enablement", () => {
