@@ -17,9 +17,14 @@ ROOT = Path(__file__).resolve().parent
 LOCAL_DATABASE_URL = "postgres://openleash:openleash@localhost:9543/openleash"
 DOTENV: dict[str, str] = {}
 DEFAULT_MIGRATION_LOG_DIR = Path.home() / ".openleash" / "migration-logs"
+CLOUD_CLIENT_API_ROOT = Path(
+    os.environ.get("OPENLEASH_CLOUD_CLIENT_API_DIR", ROOT / "apps" / "cloud-client-api")
+)
+if not CLOUD_CLIENT_API_ROOT.exists() and (ROOT.parent / "cloud-client-api").exists():
+    CLOUD_CLIENT_API_ROOT = ROOT.parent / "cloud-client-api"
 MIGRATION_DIRECTORIES = {
     "core": ROOT / "apps" / "engine" / "infra" / "postgres" / "migrations",
-    "cloud": ROOT / "apps" / "cloud-client-api" / "infra" / "postgres" / "migrations",
+    "cloud": CLOUD_CLIENT_API_ROOT / "infra" / "postgres" / "migrations",
 }
 
 
@@ -211,7 +216,7 @@ def migration_steps(scope: str, action: str, database_url: str) -> list[Step]:
     if scope == "core":
         return [Step("core-migrate", ["npm", "run", "db:migrate", "-w", "@openleash/client-api", "--", *extra_args], ROOT, env)]
     if scope == "cloud":
-        return [Step("cloud-migrate", ["npx", "tsx", "src/migrate.ts", *extra_args], ROOT / "apps" / "cloud-client-api", env)]
+        return [Step("cloud-migrate", ["npx", "tsx", "src/migrate.ts", *extra_args], CLOUD_CLIENT_API_ROOT, env)]
     raise ValueError(f"unknown migration scope: {scope}")
 
 
