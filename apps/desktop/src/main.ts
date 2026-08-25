@@ -48,7 +48,7 @@ import {
   OPENLEASH_PUBLIC_CLOUD_DASHBOARD_URL,
 } from "./public-config";
 import type { PluginCatalogItem } from "./plugin-catalog";
-import { canonicalPluginSlug } from "./plugin-slug";
+import { canonicalPluginSlug, responsiblePluginSlug } from "./plugin-slug";
 import { excludedProjectPathsCovering } from "./project-exclusions";
 import type {
   OpenLeashClientViewModel,
@@ -6474,13 +6474,9 @@ function noticePluginName(item: PendingDecision) {
   const runs = Array.isArray(payload?.openleashPluginRuns)
     ? payload.openleashPluginRuns
     : [];
-  const run = runs.find((entry) =>
-    ["blocked", "needs_question", "failed"].includes(
-      String((entry as { status?: string }).status ?? "").toLowerCase(),
-    ),
-  );
-  const pluginId = item.plugin_id || run?.pluginId || run?.plugin_id;
-  return canonicalPluginSlug(pluginId);
+  return responsiblePluginSlug(item.plugin_id, {
+    openleashPluginRuns: runs,
+  });
 }
 
 function approvalTitle(item: PendingDecision) {

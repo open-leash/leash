@@ -16,9 +16,11 @@ const SEVERITY_PRIORITY: Record<string, number> = {
 };
 
 const DOMAIN_TIE_PRIORITY: Record<string, number> = {
+  "openleash.dlp": 4,
   "openleash.blast-radius": 3,
   "openleash.sensitive-access": 2,
   "openleash.rules-enforcer": 1,
+  "openleash.prompt-compression": 0,
 };
 
 export function notificationPluginAttribution(payload: unknown) {

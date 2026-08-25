@@ -16,7 +16,7 @@ import {
   prioritizeAgentSessions,
   shouldPresentActivityIsland,
 } from "./activity-island";
-import { canonicalPluginSlug } from "./plugin-slug";
+import { canonicalPluginSlug, responsiblePluginSlug } from "./plugin-slug";
 
 test("plugin presentation always uses canonical slugs", () => {
   assert.equal(canonicalPluginSlug("Blast Radius"), "blast-radius");
@@ -24,6 +24,15 @@ test("plugin presentation always uses canonical slugs", () => {
   assert.equal(canonicalPluginSlug("openleash.prompt-compression"), "token-saver");
   assert.equal(canonicalPluginSlug("token-compression"), "token-saver");
   assert.equal(canonicalPluginSlug("openleash.core"), "openleash-core");
+});
+
+test("approval attribution prefers a closed DLP failure over a fail-open token-saver error", () => {
+  assert.equal(responsiblePluginSlug("openleash.prompt-compression", {
+    openleashPluginRuns: [
+      { pluginId: "openleash.prompt-compression", status: "failed" },
+      { pluginId: "openleash.dlp", status: "failed" },
+    ],
+  }), "data-leakage-prevention");
 });
 
 test("only shows Token Saver after it publishes a real savings metric", () => {

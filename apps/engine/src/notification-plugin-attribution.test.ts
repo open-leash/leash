@@ -70,3 +70,14 @@ test("does not let tie priority override a higher-severity sensitive finding", (
 
   assert.equal(attribution.plugin_name, "sensitive-access");
 });
+
+test("attributes a closed DLP failure ahead of a fail-open token-saver failure", () => {
+  const attribution = notificationPluginAttribution({
+    openleashPluginRuns: [
+      { pluginId: "openleash.prompt-compression", status: "failed" },
+      { pluginId: "openleash.dlp", status: "failed" },
+    ],
+  });
+
+  assert.equal(attribution.plugin_name, "data-leakage-prevention");
+});

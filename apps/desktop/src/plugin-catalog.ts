@@ -93,7 +93,7 @@ export const bundledFirstPartyPlugins: BundledPluginManifest[] = [
     },
     entrypoint: "client-api",
     events: ["provider.request.beforeSend", "plugin.tool.execute", "prompt.beforeSubmit"],
-    permissions: ["event:read", "prompt:read", "prompt:write", "provider-request:read", "provider-request:write", "local-model:run", "audit:write", "log:write", "usage:write", "island:publish"],
+    permissions: ["event:read", "prompt:read", "prompt:write", "provider-request:read", "provider-request:write", "local-model:run", "model:invoke", "audit:write", "log:write", "usage:write", "island:publish"],
     effects: ["transform", "observe"],
     ordering: { priority: 100, before: ["openleash.dlp"] },
     configSchema: {
