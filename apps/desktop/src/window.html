@@ -45,21 +45,26 @@
         right: 0;
         height: 58px;
         -webkit-app-region: drag;
+        pointer-events: none;
       }
-      aside, .head {
+      .brand, .head {
         -webkit-app-region: drag;
       }
-      button, input, label, nav, main, .card, .switch, .actions {
+      button, input, label, nav, main, aside, .card, .switch, .actions {
         -webkit-app-region: no-drag;
       }
       .app {
+        --sidebar-width: clamp(280px, 25vw, 340px);
         height: 100vh;
         min-height: 0;
         display: grid;
-        grid-template-columns: clamp(280px, 25vw, 340px) minmax(0, 1fr);
+        grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
         gap: 14px;
         padding: 14px;
         overflow: hidden;
+      }
+      .app.sidebar-expanded {
+        --sidebar-width: min(410px, 42vw);
       }
       aside, main {
         background: var(--panel);
@@ -83,6 +88,34 @@
         font-weight: 900;
       }
       .brand img { width: 28px; height: 28px; border-radius: 7px; object-fit: contain; }
+      .brandName { flex: 1 1 auto; }
+      .sidebarExpand {
+        position: relative;
+        z-index: 1;
+        width: 36px;
+        height: 36px;
+        display: grid;
+        flex: 0 0 36px;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        background: var(--soft);
+        color: var(--muted);
+        cursor: pointer;
+        -webkit-app-region: no-drag;
+      }
+      .sidebarExpand:hover { border-color: var(--line-2); color: var(--ink); }
+      .sidebarExpand svg {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        transition: transform .18s ease;
+      }
+      .app.sidebar-expanded .sidebarExpand svg { transform: rotate(180deg); }
       nav {
         display: grid;
         flex: 1 1 auto;
@@ -90,6 +123,8 @@
         gap: 12px;
         overflow-x: hidden;
         overflow-y: auto;
+        touch-action: pan-y;
+        pointer-events: auto;
         overscroll-behavior: contain;
         padding-right: 4px;
         scrollbar-gutter: stable;
@@ -129,6 +164,13 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .app.sidebar-expanded nav button .navLabel {
+        overflow: visible;
+        text-overflow: clip;
+        white-space: normal;
+        line-height: 1.3;
+        overflow-wrap: anywhere;
       }
       nav button.active { background: var(--soft); color: var(--ink); }
       nav button svg {
@@ -1682,6 +1724,162 @@
         gap: 12px;
         align-items: center;
       }
+      .settingsPage {
+        width: min(1120px, 100%);
+        margin: 0 auto;
+        padding-bottom: 28px;
+      }
+      .settingsPage .head p { margin-top: 7px; font-size: 16px; }
+      .settingsHero {
+        position: relative;
+        display: grid;
+        grid-template-columns: 58px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 18px;
+        margin-top: 24px;
+        padding: 22px 24px;
+        overflow: hidden;
+        border: 1px solid rgba(91, 77, 240, .16);
+        border-radius: 20px;
+        background: linear-gradient(135deg, #f2efff 0%, #fffdf7 52%, #eaf8f1 100%);
+        box-shadow: var(--shadow-sm);
+      }
+      .settingsHero::after {
+        content: "";
+        position: absolute;
+        width: 190px;
+        height: 190px;
+        top: -118px;
+        right: -48px;
+        border-radius: 50%;
+        background: rgba(91, 77, 240, .08);
+      }
+      .settingsHeroIcon {
+        display: grid;
+        width: 58px;
+        height: 58px;
+        place-items: center;
+        border-radius: 17px;
+        background: var(--accent);
+        color: #fff;
+        box-shadow: 0 10px 28px rgba(91, 77, 240, .24);
+      }
+      .settingsHeroIcon svg { width: 30px; height: 30px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+      .settingsHero strong { display: block; font-size: 19px; }
+      .settingsHero p { margin-top: 4px; max-width: 650px; }
+      .settingsHeroStatus {
+        position: relative;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 13px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, .82);
+        color: #12734e;
+        font-size: 12px;
+        font-weight: 900;
+        white-space: nowrap;
+        box-shadow: inset 0 0 0 1px rgba(18, 115, 78, .12);
+      }
+      .settingsHeroStatus::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #1ca66f; box-shadow: 0 0 0 4px rgba(28,166,111,.12); }
+      .settingsLayout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+      .settingsCard {
+        min-width: 0;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: #fff;
+        box-shadow: var(--shadow-sm);
+      }
+      .settingsSpan { grid-column: 1 / -1; }
+      .settingsCardHead {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+      }
+      .settingsEyebrow {
+        display: block;
+        margin-bottom: 7px;
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+      .settingsCardHead h2 { font-size: 22px; }
+      .settingsCardHead p { margin-top: 6px; max-width: 720px; }
+      .scopeEmpty {
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr);
+        align-items: center;
+        gap: 12px;
+        margin-top: 17px;
+        padding: 16px;
+        border: 1px dashed var(--line-2);
+        border-radius: 14px;
+        background: var(--soft);
+      }
+      .scopeEmptyIcon { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 12px; background: #e6f5ed; color: #11795f; font-size: 20px; }
+      .scopeEmpty strong { display: block; margin-bottom: 2px; }
+      .scopeNote { margin-top: 13px; color: var(--muted); font-size: 12px; }
+      .settingsControlList { display: grid; gap: 0; margin-top: 14px; }
+      .settingsControl {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 16px;
+        padding: 16px 0;
+        border-top: 1px solid var(--line);
+      }
+      .settingsControl:first-child { border-top: 0; padding-top: 4px; }
+      .settingsControl strong { display: block; }
+      .settingsControl p { margin-top: 4px; font-size: 13px; }
+      .settingsPage select { min-width: 190px; }
+      .settingsDisclosure {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: #fff;
+        box-shadow: var(--shadow-sm);
+      }
+      .settingsDisclosure > summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 18px;
+        padding: 20px 22px;
+        cursor: pointer;
+        list-style: none;
+      }
+      .settingsDisclosure > summary::-webkit-details-marker { display: none; }
+      .settingsDisclosure > summary::after { content: "+"; display: grid; width: 30px; height: 30px; place-items: center; border-radius: 10px; background: var(--soft); color: var(--ink); font-size: 20px; }
+      .settingsDisclosure[open] > summary::after { content: "−"; }
+      .settingsDisclosureTitle { display: flex; align-items: center; gap: 10px; }
+      .settingsDisclosureTitle strong { font-size: 17px; }
+      .settingsDisclosureTitle .tag { margin-left: auto; }
+      .settingsDisclosure summary p { margin-top: 4px; font-size: 13px; }
+      .settingsDisclosureBody { padding: 0 22px 22px; border-top: 1px solid var(--line); }
+      .proxyAgentGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+      .proxyAgentCard {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--soft);
+      }
+      .proxyAgentCard strong { display: block; }
+      .proxyAgentCard p { margin-top: 3px; font-size: 12px; }
+      .proxyInfo { margin-top: 12px; padding: 14px; border-radius: 14px; background: #f7f6ff; color: var(--muted); font-size: 12px; line-height: 1.5; }
+      .settingsAccount { background: #fbfaf5; }
+      .settingsAccount .dangerRow { align-items: start; }
+      .settingsDanger { border-color: #f1d1d1; background: #fffafa; }
+      .settingsDanger .settingsDisclosureBody { border-color: #f1d1d1; }
+      .settingsSaveBar { display: flex; justify-content: flex-end; margin-top: 16px; }
       .excludedProjectList {
         display: grid;
         gap: 9px;
@@ -1700,9 +1898,10 @@
       .excludedProjectRow code {
         overflow: hidden;
         color: var(--ink-2);
-        font-size: 12px;
+        font-size: 13px;
         text-overflow: ellipsis;
         white-space: nowrap;
+        user-select: text;
       }
       .excludedProjectRow button {
         min-height: 34px;
@@ -3688,6 +3887,28 @@
       .ruleCandidateRow small {
         max-width: 100%;
       }
+      @media (max-width: 980px) {
+        .app { --sidebar-width: 268px; }
+        .app.sidebar-expanded { --sidebar-width: min(360px, 44vw); }
+        .settingsLayout { grid-template-columns: 1fr; }
+        .settingsSpan { grid-column: auto; }
+        .proxyAgentGrid { grid-template-columns: 1fr; }
+      }
+      @media (max-height: 720px) {
+        aside { padding-top: 16px; padding-bottom: 14px; gap: 10px; }
+        .brand { min-height: 42px; }
+        nav { gap: 8px; padding-bottom: 8px; }
+        .foot { padding: 10px 12px; font-size: 11px; }
+      }
+      @media (max-width: 700px) {
+        .settingsHero { grid-template-columns: 48px minmax(0, 1fr); padding: 18px; }
+        .settingsHeroIcon { width: 48px; height: 48px; }
+        .settingsHeroStatus { grid-column: 1 / -1; justify-self: start; }
+        .settingsCardHead, .dangerRow { flex-direction: column; }
+        .settingsCardHead { display: flex; }
+        .settingsControl { grid-template-columns: 1fr; }
+        .settingsPage select { width: 100%; min-width: 0; }
+      }
     </style>
   </head>
   <body>
@@ -3696,7 +3917,10 @@
       <aside>
         <div class="brand">
           <img src="openleash-icon.png" alt="" />
-          Leash
+          <span class="brandName">Leash</span>
+          <button class="sidebarExpand" id="sidebarExpand" type="button" aria-label="Expand navigation" title="Expand navigation">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5"/></svg>
+          </button>
         </div>
         <nav id="sideNav"></nav>
         <div class="foot" id="modeFoot">Personal mode runs fully on this Mac. Rules, history, approvals, and Leash data stay local.</div>
@@ -3781,9 +4005,24 @@
       let debugLevelFilter = "all";
       let debugSort = "newest";
       let selectedAgentSessionId = "";
+      let sidebarExpanded = localStorage.getItem("leash-sidebar-expanded") === "true";
       const root = document.getElementById("root");
       const sideNav = document.getElementById("sideNav");
       const modeFoot = document.getElementById("modeFoot");
+      const appShell = document.querySelector(".app");
+      const sidebarExpand = document.getElementById("sidebarExpand");
+
+      function syncSidebarExpansion() {
+        appShell.classList.toggle("sidebar-expanded", sidebarExpanded);
+        sidebarExpand.setAttribute("aria-label", sidebarExpanded ? "Collapse navigation" : "Expand navigation");
+        sidebarExpand.title = sidebarExpanded ? "Collapse navigation" : "Expand navigation";
+      }
+      sidebarExpand.onclick = () => {
+        sidebarExpanded = !sidebarExpanded;
+        localStorage.setItem("leash-sidebar-expanded", String(sidebarExpanded));
+        syncSidebarExpansion();
+      };
+      syncSidebarExpansion();
 
       /* setup-connection-draft:start */
       function mergeSetupConnectionDraft(current, incoming, setupLocked, connectionTouched) {
@@ -5000,14 +5239,14 @@
         sideNav.innerHTML = `
           <div class="navSection">
             ${primaryItems.map((item) => `
-              <button type="button" data-view="${escapeHtml(item.view)}" class="${view === item.view ? "active" : ""}">
+              <button type="button" title="${escapeHtml(item.label)}" data-view="${escapeHtml(item.view)}" class="${view === item.view ? "active" : ""}">
                 <span class="navLabel">${escapeHtml(item.label)}</span>
               </button>
             `).join("")}
           </div>
           <div class="navSection">
             ${categoryItems.map((item) => `
-              <button type="button" data-view="plugins" data-plugin-view-category="${escapeHtml(item.id)}" class="navCategory ${escapeHtml(pluginCategoryClass(item.id))} ${isPluginCategoryActive(item.id) ? "active" : ""}">
+              <button type="button" title="${escapeHtml(item.label)}" data-view="plugins" data-plugin-view-category="${escapeHtml(item.id)}" class="navCategory ${escapeHtml(pluginCategoryClass(item.id))} ${isPluginCategoryActive(item.id) ? "active" : ""}">
                 ${categoryIcon(item.label)}
                 <span class="navLabel">${escapeHtml(item.label)}</span>
                 <span class="navCount">${escapeHtml(String(item.plugins.length))}</span>
@@ -5015,7 +5254,7 @@
               ${item.plugins.length > 0 ? `
                 <div class="navSubmenu">
                   ${item.plugins.map((plugin) => `
-                    <button type="button" class="navPlugin ${view === "plugin-detail" && selectedPluginId === plugin.id ? "active" : ""}" data-plugin-nav-id="${escapeHtml(plugin.id)}" data-plugin-view-category="${escapeHtml(item.id)}">
+                    <button type="button" title="${escapeHtml(pluginName(plugin))}" class="navPlugin ${view === "plugin-detail" && selectedPluginId === plugin.id ? "active" : ""}" data-plugin-nav-id="${escapeHtml(plugin.id)}" data-plugin-view-category="${escapeHtml(item.id)}">
                       <span class="navPluginIcon">${pluginIconHtml(plugin)}</span>
                       <span class="navLabel">${escapeHtml(pluginName(plugin))}</span>
                     </button>
@@ -5025,7 +5264,7 @@
             `).join("")}
           </div>
           <div class="navSection">
-            <button type="button" data-view="plugin-marketplace" class="${view === "plugin-marketplace" ? "active" : ""}">
+            <button type="button" title="More from Leash" data-view="plugin-marketplace" class="${view === "plugin-marketplace" ? "active" : ""}">
               ${categoryIcon("all")}
               <span class="navLabel">More from Leash</span>
               <span class="navCount">${escapeHtml(String(availablePlugins().length))}</span>
@@ -5033,7 +5272,7 @@
           </div>
           <div class="navSection">
             ${secondaryItems.map((item) => `
-              <button type="button" data-view="${escapeHtml(item.view)}" class="${view === item.view ? "active" : ""}">
+              <button type="button" title="${escapeHtml(item.label)}" data-view="${escapeHtml(item.view)}" class="${view === item.view ? "active" : ""}">
                 <span class="navLabel">${escapeHtml(item.label)}</span>
               </button>
             `).join("")}
@@ -6700,128 +6939,99 @@
 
       function renderSettings() {
         root.innerHTML = `
-          <div class="head">
-            <div><h1>Settings</h1><p>Manage desktop preferences for this Mac.</p></div>
-          </div>
-          ${cloudTrialBannerHtml()}
-          ${state.desktopMessage ? `<div class="desktopToast">${escapeHtml(state.desktopMessage)}</div>` : ""}
-          <div class="grid">
-            <div class="card">
-              <div class="fieldRow">
-                <div>
-                  <strong>Full conversation proxy</strong>
-                  <p>Intercept prompts, model responses, and tool traffic before the provider call. Docker is required.</p>
-                </div>
-                <span class="tag ${state.proxyStatus?.healthy ? "good" : state.proxyStatus?.running ? "warn" : ""}">${state.proxyStatus?.healthy ? "Active" : state.proxyStatus?.running ? "Starting" : "Off"}</span>
-              </div>
-              <div class="fieldRow">
-                <div><strong>Claude Code</strong><p>Sets ANTHROPIC_BASE_URL with a reversible settings backup.</p></div>
-                <label class="toggleRow"><input data-proxy-agent="claude-code" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("claude-code") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label>
-              </div>
-              <div class="fieldRow">
-                <div><strong>OpenAI Codex</strong><p>Adds a reversible Leash Responses API provider.</p></div>
-                <label class="toggleRow"><input data-proxy-agent="codex" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("codex") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label>
-              </div>
-              <div class="fieldRow">
-                <div><strong>OpenCode</strong><p>Overrides the built-in Anthropic and OpenAI provider base URLs while preserving provider options.</p></div>
-                <label class="toggleRow"><input data-proxy-agent="opencode" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("opencode") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label>
-              </div>
-              <div class="fieldRow">
-                <div><strong>NanoClaw</strong><p>Uses the reversible Claude-compatible Anthropic base URL adapter.</p></div>
-                <label class="toggleRow"><input data-proxy-agent="nanoclaw" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("nanoclaw") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label>
-              </div>
-              <div class="fieldRow">
-                <div><strong>Cursor and Cline</strong><p>Their provider URLs live in editor-managed settings. Leash provides the local endpoint without modifying extension-private state: OpenAI ${escapeHtml("http://127.0.0.1:9320/v1")} · Anthropic ${escapeHtml("http://127.0.0.1:9320")}.</p></div>
-                <span class="tag">Manual UI</span>
-              </div>
-              <div class="fieldRow">
-                <div><strong>Copilot and OpenClaw</strong><p>Protected by Leash while they work. Full provider routing requires a supported launch environment or gateway connection.</p></div>
-                <span class="tag">Hooks</span>
-              </div>
-              <div class="actions">
-                <button class="secondary" id="refreshProxy">Refresh status</button>
-                <button class="${state.proxyStatus?.installed ? "secondary dangerButton" : "primary"}" id="toggleProxy">${state.proxyStatus?.installed ? "Stop proxy" : "Start proxy"}</button>
-              </div>
-              <div id="proxyMessage" class="notice">${escapeHtml(state.proxyStatus?.error || "")}</div>
+          <div class="settingsPage">
+            <div class="head">
+              <div><h1>Settings</h1><p>Protection, preferences, and account controls for this Mac.</p></div>
             </div>
-            <div class="card">
-              <div class="fieldRow">
-                <div>
-                  <strong>Projects Leash leaves alone</strong>
-                  <p>Excluded projects and every folder inside them bypass Leash evaluation, recording, notifications, and tool gating on this Mac.</p>
-                </div>
-                <button class="secondary" id="addExcludedProject">Add project</button>
-              </div>
-              <div class="excludedProjectList">
-                ${(state.excludedProjectPaths || []).map((projectPath) => `
-                  <div class="excludedProjectRow" title="${escapeHtml(projectPath)}">
-                    <code>${escapeHtml(projectPath)}</code>
-                    <button class="secondary dangerButton" data-remove-excluded-project="${escapeHtml(projectPath)}">Remove</button>
-                  </div>
-                `).join("") || `<div class="empty">No excluded projects. Leash protects every detected project.</div>`}
-              </div>
-              <p class="notice">Full-proxy traffic still passes through the local Leash process, but Leash forwards it unchanged whenever the agent reports an excluded working directory.</p>
+            ${cloudTrialBannerHtml()}
+            ${state.desktopMessage ? `<div class="desktopToast">${escapeHtml(state.desktopMessage)}</div>` : ""}
+            <div class="settingsHero">
+              <span class="settingsHeroIcon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M16 3 27 7v8c0 7-4.5 11.5-11 14-6.5-2.5-11-7-11-14V7l11-4Z"/><path d="m11 16 3.2 3.2L21.5 12"/></svg></span>
+              <div><strong>Leash is protecting this Mac</strong><p>Every detected project is protected automatically. Exclude only the work you intentionally want Leash to leave untouched.</p></div>
+              <span class="settingsHeroStatus">${escapeHtml(String((state.localProtections || []).filter((agent) => agent.protected).length))} agents protected</span>
             </div>
-            <div class="card">
-              <div class="fieldRow">
-                <div>
-                  <strong>Notification sounds</strong>
-                  <p>Play sounds when an approval, question, or plan needs your answer, and when a protected agent finishes.</p>
-                </div>
-                <label class="toggleRow">
-                  <input id="agentDoneSound" type="checkbox" ${state.agentDoneSound ? "checked" : ""}>
-                  <span>Sounds on</span>
-                </label>
-              </div>
-              <div class="fieldRow">
-                <div>
-                  <strong>Island visibility</strong>
-                  <p>Choose when the local Island appears. Notifications always pop up on the display under your mouse.</p>
-                </div>
-                <select id="islandVisibility">
-                  <option value="always" ${(state.islandVisibility || (state.islandActivityOnly ? "activity" : "always")) === "always" ? "selected" : ""}>Always visible</option>
-                  <option value="activity" ${(state.islandVisibility || (state.islandActivityOnly ? "activity" : "always")) === "activity" ? "selected" : ""}>During agent activity</option>
-                  <option value="notifications" ${state.islandVisibility === "notifications" ? "selected" : ""}>Notifications only</option>
-                  <option value="off" ${state.islandVisibility === "off" ? "selected" : ""}>Off, tray only</option>
-                </select>
-              </div>
-              <div id="settingsMessage" class="notice"></div>
-            </div>
-            <div class="card">
-              <div class="dangerRow">
-                <div>
-                  <strong>Sign out &amp; disconnect</strong>
-                  <p>${state.remoteUser ? `Signed in as ${escapeHtml(state.remoteUser)}. ` : ""}Disconnecting removes Leash monitoring from this Mac and returns the app to the setup wizard.</p>
-                </div>
-                <button class="secondary dangerButton" id="disconnectClient">Disconnect this Mac</button>
-              </div>
-              <div id="disconnectMessage" class="notice"></div>
-            </div>
-            <div class="card dangerZone">
-              <div class="dangerGrid">
-                <div>
-                  <strong>Reset Leash</strong>
-                  <p>This restarts the desktop app after it finishes.</p>
-                </div>
-                <div class="dangerRow">
+            <div class="settingsLayout">
+              <section class="settingsCard settingsSpan">
+                <div class="settingsCardHead">
                   <div>
-                    <strong>Delete data and settings</strong>
-                    <p>Clear local cache, setup state, selected agents, and desktop preferences.</p>
+                    <span class="settingsEyebrow">Protection scope</span>
+                    <h2>Projects Leash leaves alone</h2>
+                    <p>Excluded folders—and everything inside them—bypass evaluation, recording, notifications, proxy transformation, and tool gating on this Mac.</p>
                   </div>
-                  <button class="secondary dangerButton" id="deleteDataAndSettings">Delete data and settings</button>
+                  <button class="primary" id="addExcludedProject">Choose folder</button>
                 </div>
-                <div class="dangerRow">
-                  <div>
-                    <strong>Uninstall Leash</strong>
-                    <p>Restore every managed agent configuration, remove Leash hooks and proxy settings, stop and delete the local Open Source runtime if present, and remove this app and its local data. Docker Desktop itself stays installed.</p>
+                <div class="excludedProjectList">
+                  ${(state.excludedProjectPaths || []).map((projectPath) => `
+                    <div class="excludedProjectRow" title="${escapeHtml(projectPath)}">
+                      <code>${escapeHtml(projectPath)}</code>
+                      <button class="secondary dangerButton" data-remove-excluded-project="${escapeHtml(projectPath)}">Protect again</button>
+                    </div>
+                  `).join("") || `<div class="scopeEmpty"><span class="scopeEmptyIcon">✓</span><div><strong>Everything is protected</strong><p>No projects are excluded. You can also deselect a live project directly from the Island.</p></div></div>`}
+                </div>
+                <p class="scopeNote">For full-proxy agents, traffic still reaches the local Leash process but is forwarded unchanged when its working directory is excluded.</p>
+              </section>
+
+              <section class="settingsCard">
+                <div class="settingsCardHead"><div><span class="settingsEyebrow">Experience</span><h2>Desktop preferences</h2></div></div>
+                <div class="settingsControlList">
+                  <div class="settingsControl">
+                    <div><strong>Notification sounds</strong><p>Hear when an approval needs you or an agent finishes.</p></div>
+                    <label class="toggleRow"><input id="agentDoneSound" type="checkbox" ${state.agentDoneSound ? "checked" : ""}><span>Sounds on</span></label>
                   </div>
-                  <button class="secondary dangerButton" id="uninstallApplication">Uninstall Leash</button>
+                  <div class="settingsControl">
+                    <div><strong>Island visibility</strong><p>Choose when the Island appears on your display.</p></div>
+                    <select id="islandVisibility">
+                      <option value="always" ${(state.islandVisibility || (state.islandActivityOnly ? "activity" : "always")) === "always" ? "selected" : ""}>Always visible</option>
+                      <option value="activity" ${(state.islandVisibility || (state.islandActivityOnly ? "activity" : "always")) === "activity" ? "selected" : ""}>During agent activity</option>
+                      <option value="notifications" ${state.islandVisibility === "notifications" ? "selected" : ""}>Notifications only</option>
+                      <option value="off" ${state.islandVisibility === "off" ? "selected" : ""}>Off, tray only</option>
+                    </select>
+                  </div>
                 </div>
-                <div id="uninstallMessage" class="notice"></div>
-              </div>
+                <div id="settingsMessage" class="notice"></div>
+              </section>
+
+              <section class="settingsCard settingsAccount">
+                <div class="settingsCardHead"><div><span class="settingsEyebrow">This device</span><h2>Account &amp; connection</h2></div></div>
+                <div class="settingsControlList">
+                  <div class="settingsControl">
+                    <div><strong>Sign out &amp; disconnect</strong><p>${state.remoteUser ? `Signed in as ${escapeHtml(state.remoteUser)}. ` : ""}Remove monitoring from this Mac and return to setup.</p></div>
+                    <button class="secondary dangerButton" id="disconnectClient">Disconnect this Mac</button>
+                  </div>
+                </div>
+                <div id="disconnectMessage" class="notice"></div>
+              </section>
+
+              <details class="settingsDisclosure settingsSpan">
+                <summary>
+                  <div><span class="settingsEyebrow">Advanced</span><div class="settingsDisclosureTitle"><strong>Full conversation proxy</strong><span class="tag ${state.proxyStatus?.healthy ? "good" : state.proxyStatus?.running ? "warn" : ""}">${state.proxyStatus?.healthy ? "Active" : state.proxyStatus?.running ? "Starting" : "Off"}</span></div><p>Optional provider routing controls for prompts, responses, and tool traffic.</p></div>
+                </summary>
+                <div class="settingsDisclosureBody">
+                  <div class="proxyAgentGrid">
+                    <div class="proxyAgentCard"><div><strong>Claude Code</strong><p>Reversible Anthropic base URL.</p></div><label class="toggleRow"><input data-proxy-agent="claude-code" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("claude-code") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label></div>
+                    <div class="proxyAgentCard"><div><strong>OpenAI Codex</strong><p>Leash Responses API provider.</p></div><label class="toggleRow"><input data-proxy-agent="codex" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("codex") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label></div>
+                    <div class="proxyAgentCard"><div><strong>OpenCode</strong><p>Preserves existing provider options.</p></div><label class="toggleRow"><input data-proxy-agent="opencode" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("opencode") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label></div>
+                    <div class="proxyAgentCard"><div><strong>NanoClaw</strong><p>Claude-compatible local adapter.</p></div><label class="toggleRow"><input data-proxy-agent="nanoclaw" type="checkbox" ${(state.proxyStatus?.configuredAgents || []).includes("nanoclaw") ? "checked" : ""} ${state.proxyStatus?.running ? "" : "disabled"}><span>Proxy</span></label></div>
+                  </div>
+                  <div class="proxyInfo"><strong>Cursor and Cline</strong> use editor-managed provider settings. Local endpoints: OpenAI ${escapeHtml("http://127.0.0.1:9320/v1")} · Anthropic ${escapeHtml("http://127.0.0.1:9320")}. Copilot and OpenClaw remain protected through hooks where supported.</div>
+                  <div class="actions left"><button class="secondary" id="refreshProxy">Refresh status</button><button class="${state.proxyStatus?.installed ? "secondary dangerButton" : "primary"}" id="toggleProxy">${state.proxyStatus?.installed ? "Stop proxy" : "Start proxy"}</button></div>
+                  <div id="proxyMessage" class="notice">${escapeHtml(state.proxyStatus?.error || "")}</div>
+                </div>
+              </details>
+
+              <details class="settingsDisclosure settingsDanger settingsSpan">
+                <summary><div><span class="settingsEyebrow">Danger zone</span><div class="settingsDisclosureTitle"><strong>Reset or uninstall Leash</strong></div><p>Destructive device actions stay folded away until you need them.</p></div></summary>
+                <div class="settingsDisclosureBody">
+                  <div class="dangerGrid">
+                    <div class="dangerRow"><div><strong>Delete data and settings</strong><p>Clear local cache, setup state, selected agents, and desktop preferences.</p></div><button class="secondary dangerButton" id="deleteDataAndSettings">Delete data and settings</button></div>
+                    <div class="dangerRow"><div><strong>Uninstall Leash</strong><p>Restore managed agent configuration, remove hooks and proxy settings, delete any local Open Source runtime, and remove the desktop app and its data. Docker Desktop remains installed.</p></div><button class="secondary dangerButton" id="uninstallApplication">Uninstall Leash</button></div>
+                    <div id="uninstallMessage" class="notice"></div>
+                  </div>
+                </div>
+              </details>
             </div>
+            <div class="settingsSaveBar"><button class="primary" id="saveSettings">Save preferences</button></div>
           </div>
-          <div class="actions"><button class="primary" id="saveSettings">Save settings</button></div>
         `;
         document.getElementById("refreshProxy").onclick = async () => {
           state.proxyStatus = await window.openleash.proxyStatus();

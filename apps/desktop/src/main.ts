@@ -49,6 +49,7 @@ import {
 } from "./public-config";
 import type { PluginCatalogItem } from "./plugin-catalog";
 import { canonicalPluginSlug } from "./plugin-slug";
+import { excludedProjectPathsCovering } from "./project-exclusions";
 import type {
   OpenLeashClientViewModel,
   OpenLeashAttentionEvent,
@@ -2021,17 +2022,20 @@ ipcMain.handle("openleash:choose-excluded-project", async () => {
   if (selection.canceled || !selection.filePaths[0]) {
     return { ok: false, canceled: true, excludedProjectPaths: localServer.excludedProjectPaths };
   }
+  const excludedProjectPaths = localServer.addExcludedProjectPath(selection.filePaths[0]);
+  syncActivityIsland(true);
   return {
     ok: true,
-    excludedProjectPaths: localServer.addExcludedProjectPath(selection.filePaths[0]),
+    excludedProjectPaths,
   };
 });
 ipcMain.handle(
   "openleash:remove-excluded-project",
-  (_event, payload: { projectPath?: string }) => ({
-    ok: true,
-    excludedProjectPaths: localServer.removeExcludedProjectPath(payload?.projectPath ?? ""),
-  }),
+  (_event, payload: { projectPath?: string }) => {
+    const excludedProjectPaths = localServer.removeExcludedProjectPath(payload?.projectPath ?? "");
+    syncActivityIsland(true);
+    return { ok: true, excludedProjectPaths };
+  },
 );
 ipcMain.handle(
   "openleash:save-prompt-transforms",
@@ -2425,6 +2429,9 @@ ipcMain.handle("openleash:restart-agent-targets", async (_event, payload: unknow
 });
 ipcMain.handle("openleash:set-session-monitoring", async (_event, payload: unknown) => {
   return setSessionMonitoring(payload);
+});
+ipcMain.handle("openleash:set-project-protection", async (_event, payload: unknown) => {
+  return setProjectProtection(payload);
 });
 ipcMain.handle("openleash:plugin-island-action", async (_event, payload: unknown) => {
   return handlePluginIslandAction(payload);
@@ -5615,6 +5622,26 @@ async function setSessionMonitoring(payload: unknown) {
   };
 }
 
+function setProjectProtection(payload: unknown) {
+  if (!payload || typeof payload !== "object")
+    return { ok: false, error: "Project is required." };
+  const input = payload as { projectPath?: unknown; protected?: unknown };
+  const projectPath = String(input.projectPath ?? "").trim();
+  if (!projectPath) return { ok: false, error: "This agent did not report a project folder." };
+  const protectedNow = input.protected === true;
+  let excludedProjectPaths = localServer.excludedProjectPaths;
+  if (protectedNow) {
+    for (const excludedPath of excludedProjectPathsCovering(projectPath, excludedProjectPaths)) {
+      excludedProjectPaths = localServer.removeExcludedProjectPath(excludedPath);
+    }
+  } else {
+    excludedProjectPaths = localServer.addExcludedProjectPath(projectPath);
+  }
+  window?.webContents.send("openleash:update", { excludedProjectPaths });
+  syncActivityIsland(true);
+  return { ok: true, protected: protectedNow, excludedProjectPaths };
+}
+
 async function syncRemoteSessionMonitoring(input: {
   agentKind: string;
   sessionIds: string[];
@@ -6168,6 +6195,10 @@ function handleNativeIslandMessage(line: string, host: NativeIslandHost) {
     void setSessionMonitoring(message.payload);
     return;
   }
+  if (message.action === "project-protection") {
+    void setProjectProtection(message.payload);
+    return;
+  }
   if (message.action === "plugin-action") {
     void handlePluginIslandAction(message.payload);
     return;
@@ -6370,6 +6401,8 @@ function formatNotice(notice: DecisionNotice) {
         ...session,
         agentIcon: noticeAgentIconFor(session.agentName),
         canJump: canOpenAgent(session.agentKind),
+        canSetProjectProtection: Boolean(session.projectPath),
+        projectProtected: !localServer.isProjectExcluded(session.projectPath),
         canPauseMonitoring:
           Boolean(session.monitoringPausedUntil) ||
           (

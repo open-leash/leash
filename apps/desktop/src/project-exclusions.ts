@@ -44,6 +44,12 @@ export function projectPathIsExcluded(projectPath: unknown, excludedProjectPaths
   });
 }
 
+export function excludedProjectPathsCovering(projectPath: unknown, excludedProjectPaths: unknown) {
+  return normalizeExcludedProjectPaths(excludedProjectPaths).filter((excludedPath) =>
+    projectPathIsExcluded(projectPath, [excludedPath])
+  );
+}
+
 function comparisonPath(value: string) {
   return process.platform === "win32" || process.platform === "darwin"
     ? value.toLocaleLowerCase("en-US")

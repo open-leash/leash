@@ -530,7 +530,8 @@
       .attention-question { display: grid; gap: 6px; }
       .attention-option { min-height: 34px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 10px; color: var(--soft-ink); background: rgba(255,255,255,.045); font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; }
       .attention-option.selected { border-color: rgba(88,216,255,.48); color: var(--ink); background: rgba(88,216,255,.12); }
-      .session-section-label { margin: 3px 2px 7px; color: var(--faint); font-size: 9px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+      .session-section-label { margin: 3px 2px 3px; color: var(--faint); font-size: 9px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+      .session-section-hint { margin: 0 2px 8px; color: var(--muted); font-size: 9.5px; line-height: 1.35; }
       .idle-island-state { padding: 15px 11px 13px; border: 1px solid var(--line); border-radius: 14px; color: var(--muted); background: var(--panel); font-size: 11px; line-height: 1.4; text-align: center; }
       .session-list { display: grid; gap: 7px; }
       .session-card {
@@ -579,7 +580,26 @@
       .session-live.waiting { color: var(--amber); }
       .session-live.completed { color: var(--green); }
       .session-live.paused { color: var(--amber); }
-      .session-card-controls { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+      .session-card-controls { display: grid; justify-items: end; gap: 7px; }
+      .session-control-row { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+      .session-project-protection {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 26px;
+        padding: 4px 7px;
+        border: 1px solid rgba(85,231,167,.23);
+        border-radius: 8px;
+        color: var(--green);
+        background: rgba(85,231,167,.07);
+        font-size: 8.5px;
+        font-weight: 700;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .session-project-protection:has(input:not(:checked)) { border-color: rgba(255,182,74,.26); color: var(--amber); background: rgba(255,182,74,.08); }
+      .session-project-protection input { width: 13px; height: 13px; margin: 0; accent-color: var(--green); cursor: pointer; }
+      .session-project-protection input:disabled { cursor: wait; }
       .session-monitoring-toggle {
         width: 26px;
         height: 26px;
@@ -935,6 +955,7 @@
         <div class="activity-panel" id="activityPanel" hidden>
           <div class="attention-card" id="attentionPanel" hidden></div>
           <div class="session-section-label" id="sessionSectionLabel">Live agents</div>
+          <div class="session-section-hint" id="sessionSectionHint">Deselect a project to let it run outside Leash.</div>
           <div class="session-list" id="sessionList"></div>
           <div class="activity-detail" id="activityDetail" hidden></div>
           <div class="island-contributions" id="ambientContributions"></div>
@@ -967,7 +988,7 @@
       let installAnimation;
       const $ = (id) => document.getElementById(id);
       const island = $("island"), cap = $("cap"), glyph = $("glyph"), status = $("status"), eyebrow = $("eyebrow"), title = $("title"), count = $("count"), capAgents = $("capAgents"), capMetric = $("capMetric"), notchRail = $("notchRail"), notchAgents = $("notchAgents"), notchMetric = $("notchMetric"), compactProgress = $("compactProgress"), compactProgressFill = $("compactProgressFill");
-      const installSuccess = $("installSuccess"), installFireworks = $("installFireworks"), restartAgents = $("restartAgents"), restartTargetList = $("restartTargetList"), restartError = $("restartError"), socialFollow = $("socialFollow"), activityPanel = $("activityPanel"), attentionPanel = $("attentionPanel"), sessionSectionLabel = $("sessionSectionLabel"), sessionList = $("sessionList"), activityDetail = $("activityDetail"), ambientContributions = $("ambientContributions"), summary = $("summary"), purpose = $("purpose"), evidenceBlock = $("evidenceBlock"), evidence = $("evidence"), chips = $("chips"), questions = $("questions"), plan = $("plan");
+      const installSuccess = $("installSuccess"), installFireworks = $("installFireworks"), restartAgents = $("restartAgents"), restartTargetList = $("restartTargetList"), restartError = $("restartError"), socialFollow = $("socialFollow"), activityPanel = $("activityPanel"), attentionPanel = $("attentionPanel"), sessionSectionLabel = $("sessionSectionLabel"), sessionSectionHint = $("sessionSectionHint"), sessionList = $("sessionList"), activityDetail = $("activityDetail"), ambientContributions = $("ambientContributions"), summary = $("summary"), purpose = $("purpose"), evidenceBlock = $("evidenceBlock"), evidence = $("evidence"), chips = $("chips"), questions = $("questions"), plan = $("plan");
       const guidance = $("guidance"), rememberRow = $("rememberRow"), remember = $("remember"), actions = $("actions"), hint = $("hint"), islandMenu = $("islandMenu"), menuToggle = $("menuToggle");
       const previewParams = new URLSearchParams(location.search);
       const previewPlatform = previewParams.get("preview") ? previewParams.get("platform") : null;
@@ -995,12 +1016,13 @@
         jumpToAgent: (payload) => nativeHandler.postMessage({ type: "action", action: "jump", payload }),
         restartAgentTargets: (payload) => { nativeHandler.postMessage({ type: "action", action: "restart-agent-targets", payload }); return Promise.resolve({ ok: true }); },
         setSessionMonitoring: (payload) => nativeHandler.postMessage({ type: "action", action: "session-monitoring", payload }),
+        setProjectProtection: (payload) => { nativeHandler.postMessage({ type: "action", action: "project-protection", payload }); return Promise.resolve({ ok: true }); },
         pluginIslandAction: (payload) => nativeHandler.postMessage({ type: "action", action: "plugin-action", payload }),
         islandCommand: (command) => nativeHandler.postMessage({ type: "action", action: "island-command", command }),
         setNoticePointerInside: () => {},
         onNotice: () => {},
       } : {
-        resizeNotice: () => {}, resolve: () => {}, dismissNotice: () => {}, jumpToAgent: () => {}, restartAgentTargets: () => Promise.resolve({ ok: true }), setSessionMonitoring: () => {}, pluginIslandAction: () => {}, islandCommand: () => {}, setNoticePointerInside: () => {}, onNotice: () => {},
+        resizeNotice: () => {}, resolve: () => {}, dismissNotice: () => {}, jumpToAgent: () => {}, restartAgentTargets: () => Promise.resolve({ ok: true }), setSessionMonitoring: () => {}, setProjectProtection: () => Promise.resolve({ ok: true }), pluginIslandAction: () => {}, islandCommand: () => {}, setNoticePointerInside: () => {}, onNotice: () => {},
       });
       const scheduleVisualUpdate = (callback) => nativeHandler ? callback() : requestAnimationFrame(callback);
 
@@ -1097,10 +1119,52 @@
         });
         return item;
       }
+      function sessionProjectProtectionToggle(session) {
+        const label = document.createElement("label");
+        label.className = "session-project-protection";
+        label.title = session.projectProtected === false
+          ? `Protect ${session.project || "this project"} again`
+          : `Leave ${session.project || "this project"} outside Leash`;
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = session.projectProtected !== false;
+        input.dataset.projectPath = session.projectPath || "";
+        input.setAttribute("aria-label", label.title);
+        const text = document.createElement("span");
+        const syncLabel = () => { text.textContent = input.checked ? "Protected" : "Excluded"; };
+        syncLabel();
+        label.append(input, text);
+        label.addEventListener("click", (event) => event.stopPropagation());
+        input.addEventListener("change", async () => {
+          const protectedNow = input.checked;
+          const projectPath = session.projectPath;
+          input.disabled = true;
+          sessionList.querySelectorAll('input[data-project-path]').forEach((candidate) => {
+            if (candidate.dataset.projectPath === projectPath) {
+              candidate.checked = protectedNow;
+              candidate.closest(".session-project-protection")?.querySelector("span").replaceChildren(protectedNow ? "Protected" : "Excluded");
+            }
+          });
+          const result = await Promise.resolve(bridge.setProjectProtection({ projectPath, protected: protectedNow })).catch((error) => ({ ok: false, error: error?.message }));
+          if (result?.ok === false) {
+            input.checked = !protectedNow;
+            syncLabel();
+            hint.textContent = result.error || "Could not change protection for this project.";
+          } else {
+            session.projectProtected = protectedNow;
+            hint.textContent = protectedNow
+              ? `${session.project || "This project"} is protected again.`
+              : `${session.project || "This project"} now runs outside Leash.`;
+          }
+          input.disabled = false;
+          resize();
+        });
+        return label;
+      }
       function reset() {
         clearTimeout(expandTimer);
         installAnimation?.destroy(); installAnimation = undefined; installFireworks.innerHTML = ""; installSuccess.hidden = true; restartAgents.hidden = true; restartTargetList.innerHTML = ""; restartError.hidden = true; restartError.textContent = ""; socialFollow.hidden = true;
-        activityPanel.hidden = true; attentionPanel.hidden = true; attentionPanel.innerHTML = ""; sessionSectionLabel.hidden = false; sessionList.innerHTML = ""; activityDetail.hidden = true; activityDetail.innerHTML = ""; ambientContributions.innerHTML = "";
+        activityPanel.hidden = true; attentionPanel.hidden = true; attentionPanel.innerHTML = ""; sessionSectionLabel.hidden = false; sessionSectionHint.hidden = false; sessionSectionHint.textContent = "Deselect a project to let it run outside Leash."; sessionList.innerHTML = ""; activityDetail.hidden = true; activityDetail.innerHTML = ""; ambientContributions.innerHTML = "";
         notchAgents.innerHTML = ""; notchMetric.innerHTML = ""; capAgents.innerHTML = ""; capMetric.hidden = true; capMetric.textContent = "";
         compactProgress.hidden = true; compactProgress.className = "compact-progress"; compactProgressFill.style.width = "0"; compactProgress.removeAttribute("aria-valuenow"); compactProgress.removeAttribute("aria-valuemax"); compactProgress.removeAttribute("aria-label");
         selectedAnswers = new Map(); questions.innerHTML = ""; actions.innerHTML = ""; chips.innerHTML = ""; guidance.value = "";
@@ -1277,6 +1341,8 @@
           firstSessionTitle: sessionList.querySelector(".session-title")?.textContent ?? "",
           firstSessionAction: sessionList.querySelector(".session-action")?.textContent ?? "",
           firstSessionStatus: sessionList.querySelector(".session-live")?.textContent ?? "",
+          projectProtectionCount: sessionList.querySelectorAll('.session-project-protection input[type="checkbox"]').length,
+          projectProtectedCount: sessionList.querySelectorAll('.session-project-protection input[type="checkbox"]:checked').length,
           activityDetailVisible: !activityDetail.hidden,
           attentionVisible: !attentionPanel.hidden,
           attentionActionCount: attentionPanel.querySelectorAll("button[data-attention-action]").length,
@@ -1514,11 +1580,13 @@
         renderNotchRail(sessions, payload.contributions || [], payload.tokenSaver, attention);
         if (attention?.id) renderInlineAttention(attention);
         const onlyCompleted = sessions.length > 0 && sessions.every((session) => session.visualState === "completed");
-        sessionSectionLabel.textContent = sessions.length ? (onlyCompleted ? "Recent sessions" : "Live agents") : attention?.id ? "Agent activity" : "Status";
+        sessionSectionLabel.textContent = sessions.length ? (onlyCompleted ? "Recent sessions" : "Protected right now") : attention?.id ? "Agent activity" : "Status";
         sessionSectionLabel.hidden = false;
+        sessionSectionHint.hidden = onlyCompleted || !sessions.some((session) => session.canSetProjectProtection);
+        sessionSectionHint.textContent = "Deselect a project to let it run outside Leash.";
         if (sessions.length === 0) {
           const idle = document.createElement("div"); idle.className = "idle-island-state";
-          idle.textContent = attention?.id ? "No other agents are working right now." : "No agents are working right now. Leash is watching.";
+          idle.textContent = attention?.id ? "No other agents are working right now." : "No agents are working right now. New projects are protected automatically.";
           sessionList.appendChild(idle);
         }
         sessions.forEach((session, index) => {
@@ -1539,8 +1607,10 @@
           const live = document.createElement("span"); live.className = `session-live ${session.monitoringPausedUntil ? "paused" : visualState}`;
           live.textContent = session.monitoringPausedUntil ? "Paused" : visualState === "waiting" ? "Waiting" : visualState === "running" ? "Active" : visualState === "completed" ? "Done" : "Thinking";
           const controls = document.createElement("span"); controls.className = "session-card-controls";
-          controls.appendChild(live);
-          if (session.canPauseMonitoring) controls.appendChild(sessionMonitoringToggle(session));
+          if (session.canSetProjectProtection && visualState !== "completed") controls.appendChild(sessionProjectProtectionToggle(session));
+          const controlRow = document.createElement("span"); controlRow.className = "session-control-row"; controlRow.appendChild(live);
+          if (session.canPauseMonitoring) controlRow.appendChild(sessionMonitoringToggle(session));
+          controls.appendChild(controlRow);
           card.append(icon, copy, controls);
           card.addEventListener("click", () => selectActivitySession(session, card));
           card.addEventListener("keydown", (event) => {
@@ -1665,7 +1735,9 @@
         actions.append(button("View history", "secondary", "show-history"));
         if (session.canJump) actions.append(button(`Open ${session.agentName}`, "secondary", "jump-session"));
         if (actions.childElementCount === 1) actions.className = "actions single";
-        hint.textContent = session.monitoringPausedUntil
+        hint.textContent = session.projectProtected === false
+          ? "This entire project is excluded until you protect it again."
+          : session.monitoringPausedUntil
           ? `Only this conversation is unmonitored until ${new Date(session.monitoringPausedUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`
           : session.canPauseMonitoring
             ? "Pausing bypasses protection only for this conversation."
@@ -1844,9 +1916,9 @@
             { id: "codex", agentKind: "codex", agentName: "OpenAI Codex", agentIcon: "agent-icons/openai.svg", visualState: "running", project: "design-system", title: "Refresh design tokens", summary: "Updating shared components.", latestAction: "Editing files", time: "12s", eventCount: 12, canJump: true },
           ], contributions: [] },
           activity: { kind: "activity", agentName: "Leash", agentIcon: "openleash-icon.png", title: "3 agents working", project: "3 active sessions", sessions: [
-            { id: "claude", agentKind: "claude-code", agentName: "Claude Code", agentIcon: "agent-icons/claude.svg", visualState: "running", project: "client-api", title: "Correct approval attribution", summary: "Tracing policy ownership and notification labels.", latestAction: "Running tests", time: "now", eventCount: 8, canJump: true, events: [{ tool_name: "Bash", created_at: new Date().toISOString() }] },
-            { id: "codex", sessionId: "codex-session", agentKind: "codex", agentName: "OpenAI Codex", agentIcon: "agent-icons/openai.svg", visualState: "processing", project: "desktop-client", title: "Build multi-agent activity island", summary: "Implementing the compact and expanded session experience.", latestAction: "Editing notice.html", time: "now", eventCount: 12, canJump: true, events: [{ tool_name: "Edit", created_at: new Date().toISOString() }], contributions: [{ pluginId: "openleash.blast-radius", pluginName: "blast-radius", pluginIcon: "💥", kind: "annotation", label: "Destructive filesystem operation", detail: "Recursive deletion affects this workspace.", value: "critical", tone: "danger", action: { id: "open", label: "Open session", type: "open-session" } }] },
-            { id: "gemini", agentKind: "gemini", agentName: "Google Gemini CLI", agentIcon: "agent-icons/gemini.svg", visualState: "processing", project: "docs-web", title: "Review agent setup docs", summary: "Checking supported-agent instructions.", latestAction: "Reading documentation", time: "1m", eventCount: 4, canJump: false, events: [{ event_name: "PostToolUse", created_at: new Date(Date.now() - 60_000).toISOString() }] },
+            { id: "claude", agentKind: "claude-code", agentName: "Claude Code", agentIcon: "agent-icons/claude.svg", visualState: "running", project: "client-api", projectPath: "/Users/max/Code/client-api", projectProtected: true, canSetProjectProtection: true, title: "Correct approval attribution", summary: "Tracing policy ownership and notification labels.", latestAction: "Running tests", time: "now", eventCount: 8, canJump: true, events: [{ tool_name: "Bash", created_at: new Date().toISOString() }] },
+            { id: "codex", sessionId: "codex-session", agentKind: "codex", agentName: "OpenAI Codex", agentIcon: "agent-icons/openai.svg", visualState: "processing", project: "OL2", projectPath: "/Users/max/Code/OL2", projectProtected: true, canSetProjectProtection: true, title: "Build multi-agent activity island", summary: "Implementing the compact and expanded session experience.", latestAction: "Editing notice.html", time: "now", eventCount: 12, canJump: true, events: [{ tool_name: "Edit", created_at: new Date().toISOString() }], contributions: [{ pluginId: "openleash.blast-radius", pluginName: "blast-radius", pluginIcon: "💥", kind: "annotation", label: "Destructive filesystem operation", detail: "Recursive deletion affects this workspace.", value: "critical", tone: "danger", action: { id: "open", label: "Open session", type: "open-session" } }] },
+            { id: "gemini", agentKind: "gemini", agentName: "Google Gemini CLI", agentIcon: "agent-icons/gemini.svg", visualState: "processing", project: "docs-web", projectPath: "/Users/max/Code/docs-web", projectProtected: true, canSetProjectProtection: true, title: "Review agent setup docs", summary: "Checking supported-agent instructions.", latestAction: "Reading documentation", time: "1m", eventCount: 4, canJump: false, events: [{ event_name: "PostToolUse", created_at: new Date(Date.now() - 60_000).toISOString() }] },
           ], contributions: [{ pluginId: "community.test-progress", pluginName: "test-progress", pluginIcon: "TP", kind: "status", title: "Test suite running", detail: "18 of 24 tests passed.", tone: "info", progress: { current: 18, total: 24, label: "18 / 24" } }] },
         };
         renderNotice(fixtures[preview] || fixtures.approval);

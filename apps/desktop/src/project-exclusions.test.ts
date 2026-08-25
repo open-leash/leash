@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  excludedProjectPathsCovering,
   normalizeExcludedProjectPath,
   normalizeExcludedProjectPaths,
   projectPathIsExcluded,
@@ -32,6 +33,13 @@ test("an excluded project also excludes nested repositories but not siblings", (
   assert.equal(projectPathIsExcluded("/Users/max/Code/OL2-copy", exclusions), false);
   assert.equal(projectPathIsExcluded("/Users/max/Code/Other", exclusions), false);
   assert.equal(projectPathIsExcluded(undefined, exclusions), false);
+  assert.deepEqual(
+    excludedProjectPathsCovering("/Users/max/Code/OL2/leash", [
+      "/Users/max/Code/OL2",
+      "/Users/max/Code/Other",
+    ]),
+    ["/Users/max/Code/OL2"],
+  );
 });
 
 test("the desktop edge bypasses monitoring and transformation for excluded projects", async () => {

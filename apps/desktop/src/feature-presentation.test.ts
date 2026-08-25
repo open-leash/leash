@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const renderer = readFileSync(path.join(__dirname, "window.html"), "utf8");
+const islandRenderer = readFileSync(path.join(__dirname, "notice.html"), "utf8");
 const desktopMain = readFileSync(path.join(__dirname, "main.ts"), "utf8");
 const preload = readFileSync(path.join(__dirname, "preload.ts"), "utf8");
 const copyAssets = readFileSync(path.join(__dirname, "copy-assets.mjs"), "utf8");
@@ -80,22 +81,39 @@ test("macOS tray keeps the original colored Leash icon with stable placement", (
 });
 
 test("desktop navigation remains reachable in short windows", () => {
-  assert.match(renderer, /grid-template-columns: clamp\(280px, 25vw, 340px\) minmax\(0, 1fr\)/);
+  assert.match(renderer, /--sidebar-width: clamp\(280px, 25vw, 340px\)/);
+  assert.match(renderer, /grid-template-columns: var\(--sidebar-width\) minmax\(0, 1fr\)/);
   assert.match(renderer, /nav\s*\{[\s\S]*?flex: 1 1 auto;[\s\S]*?min-height: 0;[\s\S]*?overflow-y: auto;/);
   assert.match(renderer, /overscroll-behavior: contain/);
+  assert.match(renderer, /button, input, label, nav, main, aside,[\s\S]*?-webkit-app-region: no-drag/);
   assert.match(renderer, /nav button\.navPlugin \.navLabel\s*\{[\s\S]*?white-space: normal;/);
+  assert.match(renderer, /id="sidebarExpand"/);
+  assert.match(renderer, /appShell\.classList\.toggle\("sidebar-expanded", sidebarExpanded\)/);
+  assert.match(renderer, /\.app\.sidebar-expanded nav button \.navLabel[\s\S]*?white-space: normal/);
   assert.match(renderer, /\.foot\s*\{[\s\S]*?flex: 0 0 auto;/);
 });
 
 test("Settings can exclude a project from local monitoring without weakening other projects", () => {
   assert.match(renderer, /Projects Leash leaves alone/);
-  assert.match(renderer, /id="addExcludedProject">Add project<\/button>/);
+  assert.match(renderer, /id="addExcludedProject">Choose folder<\/button>/);
   assert.match(renderer, /data-remove-excluded-project/);
   assert.match(renderer, /window\.openleash\.chooseExcludedProject\(\)/);
   assert.match(renderer, /window\.openleash\.removeExcludedProject/);
   assert.match(preload, /chooseExcludedProject: \(\) => ipcRenderer\.invoke\("openleash:choose-excluded-project"\)/);
   assert.match(desktopMain, /localServer\.addExcludedProjectPath/);
   assert.match(desktopMain, /localServer\.removeExcludedProjectPath/);
+});
+
+test("the Island exposes permanent protection scope for every live project", () => {
+  assert.match(islandRenderer, /Protected right now/);
+  assert.match(islandRenderer, /Deselect a project to let it run outside Leash/);
+  assert.match(islandRenderer, /sessionProjectProtectionToggle\(session\)/);
+  assert.match(islandRenderer, /bridge\.setProjectProtection\(\{ projectPath, protected: protectedNow \}\)/);
+  assert.match(preload, /setProjectProtection: \(payload: unknown\) => ipcRenderer\.invoke\("openleash:set-project-protection", payload\)/);
+  assert.match(desktopMain, /canSetProjectProtection: Boolean\(session\.projectPath\)/);
+  assert.match(desktopMain, /projectProtected: !localServer\.isProjectExcluded\(session\.projectPath\)/);
+  assert.match(desktopMain, /ipcMain\.handle\("openleash:set-project-protection"/);
+  assert.match(desktopMain, /function setProjectProtection\(payload: unknown\)/);
 });
 
 test("Settings can fully disconnect this Mac and return to setup", () => {

@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld("openleash", {
   jumpToAgent: (payload: unknown) => ipcRenderer.invoke("openleash:jump-to-agent", payload),
   restartAgentTargets: (payload: unknown) => ipcRenderer.invoke("openleash:restart-agent-targets", payload),
   setSessionMonitoring: (payload: unknown) => ipcRenderer.invoke("openleash:set-session-monitoring", payload),
+  setProjectProtection: (payload: unknown) => ipcRenderer.invoke("openleash:set-project-protection", payload),
   pluginIslandAction: (payload: unknown) => ipcRenderer.invoke("openleash:plugin-island-action", payload),
   islandCommand: (command: string) => ipcRenderer.invoke("openleash:island-command", command),
   onUpdate: (callback: (payload: unknown) => void) => {
