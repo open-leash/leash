@@ -110,6 +110,26 @@ jobs:
           NODE
           npx electron-builder --config electron-builder.mac.release.yml --mac --arm64 --publish never
 
+      - name: Notarize and staple production DMG container
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: apps/desktop
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          dmg_path=$(find release/macos -maxdepth 1 -type f -name 'Leash-*.dmg' -print -quit)
+          test -n "$dmg_path"
+          xcrun notarytool submit "$dmg_path" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 2h
+          xcrun stapler staple "$dmg_path"
+
       - name: Verify production signature and notarization
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: apps/desktop
@@ -124,6 +144,8 @@ jobs:
           spctl --assess --type execute --verbose=4 "$app_path"
           xcrun stapler validate "$app_path"
           xcrun stapler validate "$dmg_path"
+          hdiutil verify "$dmg_path"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
 
       - name: Smoke-test fresh install and running-app upgrade
         working-directory: apps/desktop
