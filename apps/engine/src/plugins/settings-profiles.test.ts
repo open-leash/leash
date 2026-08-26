@@ -36,6 +36,27 @@ test("merges matching organization then user profiles deterministically", () => 
   assert.deepEqual(resolved.effectiveProfileIds, ["organization:org", "user:codex"]);
 });
 
+test("applies centrally managed employee and IdP group profiles", () => {
+  const profiles = normalizePluginSettingProfiles([
+    { id: "engineering-monitor", name: "Engineering", agentKinds: [], groupIds: ["group-engineering"], config: { protectionMode: "monitor" } },
+    { id: "alice-active", name: "Alice", agentKinds: [], userIds: ["user-alice"], config: { protectionMode: "active" }, priority: 100 },
+  ]);
+  assert.equal(resolvePluginSettingProfiles({
+    enabled: true,
+    config: { protectionMode: "active" },
+    organizationProfiles: profiles,
+    userId: "user-bob",
+    groupIds: ["group-engineering"],
+  }).config.protectionMode, "monitor");
+  assert.equal(resolvePluginSettingProfiles({
+    enabled: true,
+    config: { protectionMode: "active" },
+    organizationProfiles: profiles,
+    userId: "user-alice",
+    groupIds: ["group-engineering"],
+  }).config.protectionMode, "active");
+});
+
 test("locked organization settings ignore user profiles", () => {
   const resolved = resolvePluginSettingProfiles({
     enabled: true,

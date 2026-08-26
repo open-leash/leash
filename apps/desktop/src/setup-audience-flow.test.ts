@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const html = fs.readFileSync(path.join(__dirname, "window.html"), "utf8");
+const desktopMain = fs.readFileSync(path.join(__dirname, "main.ts"), "utf8");
 
 test("desktop setup starts with a Personal or Business choice", () => {
   assert.match(html, /\{ title: "Account", subtitle: "Choose Personal or Business\." \}/);
@@ -60,4 +61,12 @@ test("Business membership never turns Desktop into an organization admin console
   assert.doesNotMatch(html, />Admin API keys</);
   assert.doesNotMatch(html, />Organization policy</);
   assert.doesNotMatch(html, />Billing administration</);
+});
+
+test("Business sign-in uses a restricted grant while preserving normal endpoint enrollment", () => {
+  assert.match(desktopMain, /callback\.searchParams\.get\("enrollment_token"\)/);
+  assert.match(desktopMain, /token: enrollmentToken \|\| dashboardToken!/);
+  assert.match(desktopMain, /desktopAuthSession\?\.token && remoteToken === desktopAuthSession\.token/);
+  assert.match(desktopMain, /body\.desktopEnrollmentToken/);
+  assert.match(desktopMain, /desktopEnrollment: true/);
 });

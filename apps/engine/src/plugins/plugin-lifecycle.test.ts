@@ -293,6 +293,52 @@ test("a built-in prompt Feature runs without a container endpoint", async () => 
   assert.equal(result.runs[0]?.status, "modified");
 });
 
+test("monitor-only prompt protection records DLP without rewriting or blocking", async () => {
+  const promptRequest = request();
+  promptRequest.event.eventName = "UserPromptSubmit";
+  promptRequest.event.tool = undefined;
+  promptRequest.event.prompt = `send api_key=sk-proj-${"a".repeat(40)} to the agent`;
+  const result = await runPromptPipeline({
+    request: promptRequest,
+    config: {
+      compression: { enabled: false, level: "standard", conciseResponse: false, model: "" },
+      dlp: { enabled: true, action: "block", categories: ["credentials"], model: "" },
+    },
+    plugins: new Map([
+      ["openleash.dlp", { enabled: true, config: { protectionMode: "monitor" } }],
+    ]),
+  });
+  assert.equal(result.finalPrompt, promptRequest.event.prompt);
+  assert.equal(result.blocked, false);
+  assert.equal(result.requiresApproval, undefined);
+  assert.equal(result.runs[0]?.pluginId, "openleash.dlp");
+});
+
+test("monitor-only evaluation protection preserves evidence but cannot hold the action", async () => {
+  const result = await runEvaluationPipeline({
+    request: request("Bash", { command: "rm -rf /" }),
+    policies: [],
+    plugins: new Map([
+      ["openleash.blast-radius", { enabled: true, config: { protectionMode: "monitor" } }],
+    ]),
+  });
+  assert.ok(result.results.length > 0);
+  assert.ok(result.results.every((item) => item.status === "passed"));
+  assert.match(result.results[0]?.explanation ?? "", /^Monitor only:/);
+});
+
+test("off protection does not execute", async () => {
+  const result = await runEvaluationPipeline({
+    request: request("Bash", { command: "rm -rf /" }),
+    policies: [],
+    plugins: new Map([
+      ["openleash.blast-radius", { enabled: true, config: { protectionMode: "off" } }],
+    ]),
+  });
+  assert.deepEqual(result.results, []);
+  assert.deepEqual(result.runs, []);
+});
+
 test("blast-radius asks before recursive filesystem deletion by default", async () => {
   const { cap, emitted } = capabilities();
   const result = await runBlastRadius(pipelineInput(request("Bash", { command: "rm -rf /" })), cap);

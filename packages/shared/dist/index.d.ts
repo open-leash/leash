@@ -133,6 +133,10 @@ export type PluginSettingProfile = {
     agentIds?: string[];
     /** Normalized project roots. Empty means every project; descendants match their root. */
     projectPaths?: string[];
+    /** Organization user identifiers targeted by a centrally managed profile. */
+    userIds?: string[];
+    /** Identity-provider group identifiers targeted by a centrally managed profile. */
+    groupIds?: string[];
     enabled?: boolean;
     config: Record<string, unknown>;
     priority?: number;
@@ -1296,9 +1300,16 @@ export type MobileAuthExchangeRequest = {
     idToken?: string;
     redirectUri: string;
     provisionUser?: boolean;
+    /**
+     * Also issue a short-lived enrollment grant for an authenticated Desktop handoff.
+     * The dashboard access token remains browser-only.
+     */
+    desktopEnrollment?: boolean;
 };
 export type MobileAuthExchangeResponse = {
     success: boolean;
+    /** Short-lived credential accepted only by the Desktop enrollment endpoint. */
+    desktopEnrollmentToken?: string;
     tokens: {
         accessToken: string;
         expiresAt: string;

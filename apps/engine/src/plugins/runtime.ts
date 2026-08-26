@@ -40,6 +40,7 @@ export async function runPromptPipeline(
     input.request.agent.kind,
   ).filter((plugin) => plugin.effects.includes("transform"))) {
     if (featureAlreadyApplied(input.request, plugin.id)) continue;
+    const monitorOnly = pluginProtectionMode(input.plugins, plugin.id) === "monitor";
     const capabilities = createPluginCapabilities({
       tenantModelKey: input.tenantModelKey,
       organizationId: input.organizationId,
@@ -53,6 +54,7 @@ export async function runPromptPipeline(
     });
     try {
       if (plugin.id === "openleash.prompt-compression") {
+        const promptBeforePlugin = current;
         const step = await runPromptCompression({
           prompt: current,
           config: input.config.compression,
@@ -61,6 +63,7 @@ export async function runPromptPipeline(
           supportsPromptReplacement: sourceAllowsPromptReplacement(input.request),
         });
         current = step.prompt;
+        if (monitorOnly) current = promptBeforePlugin;
         runs.push(step.run);
         if (step.result?.model) models.add(step.result.model);
         if (step.result?.compression) compression = step.result.compression;
@@ -68,6 +71,7 @@ export async function runPromptPipeline(
       }
 
       if (plugin.id === "openleash.dlp") {
+        const promptBeforePlugin = current;
         const step = await runDlp({
           prompt: current,
           config: input.config.dlp,
@@ -75,10 +79,11 @@ export async function runPromptPipeline(
           startedAt: Date.now(),
         });
         current = step.prompt;
+        if (monitorOnly) current = promptBeforePlugin;
         runs.push(step.run);
         if (step.result?.model) models.add(step.result.model);
         if (step.result?.dlp) dlp = step.result.dlp;
-        if (step.result?.blocked) {
+        if (step.result?.blocked && !monitorOnly) {
           return {
             finalPrompt: current,
             blocked: true,
@@ -89,7 +94,7 @@ export async function runPromptPipeline(
             runs,
           };
         }
-        if (step.result?.requiresApproval) {
+        if (step.result?.requiresApproval && !monitorOnly) {
           return {
             finalPrompt: current,
             blocked: false,
@@ -105,7 +110,7 @@ export async function runPromptPipeline(
     } catch (error) {
       const failure = pluginFailureRun(plugin, "prompt.beforeSubmit", error);
       runs.push(failure);
-      if ((plugin.execution?.failureMode ?? "closed") === "closed") {
+      if ((plugin.execution?.failureMode ?? "closed") === "closed" && !monitorOnly) {
         return {
           finalPrompt: current,
           blocked: false,
@@ -198,7 +203,7 @@ export async function runEvaluationPipeline(
       .map(
       async (plugin) => {
         if (featureAlreadyApplied(input.request, plugin.id)) {
-          return { results: [], runs: [], model: "none" };
+          return { pluginId: plugin.id, results: [], runs: [], model: "none" };
         }
         const capabilities = createPluginCapabilities({
           tenantModelKey: input.tenantModelKey,
@@ -214,7 +219,7 @@ export async function runEvaluationPipeline(
         try {
           if (plugin.id === "openleash.sensitive-access") {
             const result = await runSensitiveAccess(input, capabilities);
-            return { results: result.results, runs: [result.run], model: "none" };
+            return { pluginId: plugin.id, results: result.results, runs: [result.run], model: "none" };
           }
           if (plugin.id === "openleash.code-scanner") {
             const run = await runCodeScanner(
@@ -223,21 +228,21 @@ export async function runEvaluationPipeline(
               capabilities,
               input.plugins?.get(plugin.id)?.config,
             );
-            return { results: [], runs: [run], model: String(run.metadata?.evaluatedBy ?? "none") };
+            return { pluginId: plugin.id, results: [], runs: [run], model: String(run.metadata?.evaluatedBy ?? "none") };
           }
           if (plugin.id === "openleash.blast-radius") {
             const result = await runBlastRadius(input, capabilities);
-            return { results: result.results, runs: [result.run], model: "none" };
+            return { pluginId: plugin.id, results: result.results, runs: [result.run], model: "none" };
           }
           if (plugin.id === "openleash.rules-enforcer") {
             const result = await runSecurityEvaluator(input, capabilities);
-            return { results: result.results, runs: [result.run], model: result.model };
+            return { pluginId: plugin.id, results: result.results, runs: [result.run], model: result.model };
           }
           if (plugin.id === "openleash.mcp-scanner") {
             const result = await runMcpScanner(input, capabilities);
-            return { results: [], runs: [result.run], model: "none", mcpCall: result.call };
+            return { pluginId: plugin.id, results: [], runs: [result.run], model: "none", mcpCall: result.call };
           }
-          return { results: [], runs: [], model: "none" };
+          return { pluginId: plugin.id, results: [], runs: [], model: "none" };
         } catch (error) {
           const failure = pluginFailureRun(plugin, event, error);
           if ((plugin.execution?.failureMode ?? "closed") === "closed") {
@@ -251,11 +256,13 @@ export async function runEvaluationPipeline(
                 evidence: [],
                 question: `${pluginSlug(plugin)} could not complete its safety check. Allow this action once?`,
               }],
+              pluginId: plugin.id,
               runs: [failure],
               model: "none",
             };
           }
           return {
+            pluginId: plugin.id,
             results: [],
             runs: [failure],
             model: "none",
@@ -266,13 +273,30 @@ export async function runEvaluationPipeline(
   );
 
   return {
-    results: steps.flatMap((step) => step.results),
+    results: steps.flatMap((step) =>
+      pluginProtectionMode(input.plugins, step.pluginId) === "monitor"
+        ? step.results.map((result) => ({
+            ...result,
+            status: "passed" as const,
+            explanation: `Monitor only: ${result.explanation}`,
+            question: undefined,
+          }))
+        : step.results
+    ),
     model:
       steps.map((step) => step.model).find((model) => model !== "none") ??
       "none",
     runs: steps.flatMap((step) => step.runs),
     mcpCall: steps.find((step) => step.mcpCall)?.mcpCall,
   };
+}
+
+function pluginProtectionMode(
+  settings: Map<string, PluginSettingState> | undefined,
+  pluginId: string,
+) {
+  const mode = settings?.get(pluginId)?.config?.protectionMode;
+  return mode === "monitor" || mode === "off" ? mode : "active";
 }
 
 function pluginSlug(plugin: OpenLeashPluginManifest) {
@@ -327,7 +351,9 @@ function enabledPluginsForEvent(
     )
     .filter((plugin) => {
       const state = settings?.get(plugin.id);
-      return (settings ? state?.enabled === true : true) && state?.runtimeAvailable !== false;
+      return (settings ? state?.enabled === true : true) &&
+        state?.runtimeAvailable !== false &&
+        pluginProtectionMode(settings, plugin.id) !== "off";
     })
     .filter((plugin) => pluginSupportsAgent(plugin, agentKind))
     .map((plugin) => {

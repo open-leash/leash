@@ -7320,12 +7320,13 @@ async function handleDesktopAuthCallback(rawUrl: string) {
     const dashboardToken =
       callback.searchParams.get("dashboard_token") ||
       callback.searchParams.get("token");
-    if (dashboardToken) {
+    const enrollmentToken = callback.searchParams.get("enrollment_token");
+    if (dashboardToken || enrollmentToken) {
       const apiUrl = normalizeRemoteApiUrl(
         callback.searchParams.get("api_url") || cloudApiUrl,
       );
       desktopAuthSession = {
-        token: dashboardToken,
+        token: enrollmentToken || dashboardToken!,
         apiUrl,
         expiresAt: callback.searchParams.get("expires_at") || undefined,
         organizationName:
@@ -7334,7 +7335,9 @@ async function handleDesktopAuthCallback(rawUrl: string) {
           callback.searchParams.get("organization_slug") || undefined,
         userName: callback.searchParams.get("user_name") || undefined,
         userEmail: callback.searchParams.get("user_email") || undefined,
-        billing: await fetchCloudBilling(apiUrl, dashboardToken),
+        billing: dashboardToken
+          ? await fetchCloudBilling(apiUrl, dashboardToken)
+          : undefined,
       };
       presentCloudTrialStatus(desktopAuthSession.billing);
       restoreMainWindow();
@@ -7368,6 +7371,7 @@ async function handleDesktopAuthCallback(rawUrl: string) {
           organizationId: pendingDesktopAuth.organizationId,
           organizationSlug: pendingDesktopAuth.organizationSlug,
           audience: pendingDesktopAuth.audience ?? "individual",
+          desktopEnrollment: true,
         }),
       },
     );
@@ -7392,8 +7396,13 @@ async function handleDesktopAuthCallback(rawUrl: string) {
       });
       return;
     }
+    const issuedEnrollmentToken =
+      typeof body.desktopEnrollmentToken === "string" &&
+      body.desktopEnrollmentToken.trim()
+        ? body.desktopEnrollmentToken.trim()
+        : undefined;
     desktopAuthSession = {
-      token,
+      token: issuedEnrollmentToken || token,
       apiUrl: pendingDesktopAuth.apiUrl,
       expiresAt: body.tokens?.expiresAt,
       organizationName:

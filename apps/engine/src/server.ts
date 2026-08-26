@@ -1531,7 +1531,14 @@ app.get("/admin/overview", async (req, res, next) => {
           count(distinct ar.id) filter (where ar.kind not in ('openclaw', 'nanoclaw')) as agent_count,
           max(greatest(c.last_seen_at, coalesce(ar.last_seen_at, c.last_seen_at))) as last_seen_at,
           coalesce(jsonb_agg(distinct ar.display_name) filter (where ar.id is not null and ar.kind not in ('openclaw', 'nanoclaw')), '[]'::jsonb) as agents,
-          coalesce(jsonb_agg(distinct c.hostname) filter (where c.id is not null), '[]'::jsonb) as hostnames
+          coalesce(jsonb_agg(distinct c.hostname) filter (where c.id is not null), '[]'::jsonb) as hostnames,
+          coalesce(jsonb_agg(distinct jsonb_build_object(
+            'id', c.id,
+            'hostname', c.hostname,
+            'platform', c.platform,
+            'osRelease', c.os_release,
+            'lastSeenAt', c.last_seen_at
+          )) filter (where c.id is not null), '[]'::jsonb) as devices
         from users u
         left join computers c on c.user_id = u.id
         left join agent_runtimes ar on ar.computer_id = c.id
@@ -3519,6 +3526,7 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
           (audience === "organization" ? "admin" : "engineer"),
         provisionUser,
         accountAudience: audience,
+        issueDesktopEnrollmentToken: body.desktopEnrollment === true,
       });
       return res.json({ ...response, authMode: "development" });
     }
@@ -3641,6 +3649,7 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
         (audience === "organization" ? "admin" : "engineer"),
       provisionUser,
       accountAudience: audience,
+      issueDesktopEnrollmentToken: body.desktopEnrollment === true,
     });
     res.json({ ...response, authMode: providerType });
   } catch (error) {
@@ -3732,9 +3741,13 @@ app.post("/v1/mobile/devices", async (req, res, next) => {
 
 app.post("/v1/desktop/enroll", async (req, res, next) => {
   try {
-    const session = await getDashboardSession(
-      req.header("authorization") ?? "",
+    const authorization = req.header("authorization") ?? "";
+    const enrollmentSession = await getDashboardSession(
+      authorization,
+      "desktop_enrollment",
     );
+    const session =
+      enrollmentSession ?? (await getDashboardSession(authorization));
     if (!session)
       return res.status(401).json({ error: "invalid OpenLeash session" });
     const hostname =
@@ -3773,6 +3786,14 @@ app.post("/v1/desktop/enroll", async (req, res, next) => {
       agents,
       clientVersion,
     );
+    if (enrollmentSession) {
+      await pool.query(
+        `update dashboard_sessions
+         set revoked_at = now(), last_seen_at = now()
+         where token_hash = $1 and provider = 'desktop_enrollment'`,
+        [hashToken(bearerToken(authorization) ?? "")],
+      );
+    }
     res.status(201).json({
       token: agentToken,
       user: user.rows[0],
@@ -5204,8 +5225,12 @@ app.post("/v1/skills/observations", async (req, res, next) => {
       contentHash,
     );
     const pipelineSkillEvent = pipelineEventForSkillObservation(skillEventType);
+    const skillProtectionMode = normalizeBusinessProtectionMode(
+      runtimePlugins.get("openleash.skill-scanner")?.config?.protectionMode,
+    );
     const shouldScanSkill =
       runtimePlugins.get("openleash.skill-scanner")?.enabled !== false &&
+      skillProtectionMode !== "off" &&
       (skillEventType === "detected" || skillEventType === "changed");
     const tenantModelKey = shouldScanSkill
       ? await tenantModelKeyForEvaluation(organizationId)
@@ -5371,14 +5396,18 @@ app.post("/v1/skills/observations", async (req, res, next) => {
             }),
           ],
         );
+        const monitorOnly = skillProtectionMode === "monitor";
         const evaluation = await client.query(
           `insert into evaluations (conversation_event_id, user_id, decision, summary, question, model)
-           values ($1, $2, 'ask', $3, $4, 'skill-evaluator') returning id`,
+           values ($1, $2, $3, $4, $5, 'skill-evaluator') returning id`,
           [
             event.rows[0].id,
             user.id,
-            "Leash detected a possibly malicious agent skill.",
-            "Leash detected a possibly malicious agent skill. Delete this skill or approve it?",
+            monitorOnly ? "allow" : "ask",
+            monitorOnly
+              ? "Leash observed a possibly malicious agent skill in monitor-only mode."
+              : "Leash detected a possibly malicious agent skill.",
+            monitorOnly ? null : "Leash detected a possibly malicious agent skill. Delete this skill or approve it?",
           ],
         );
         evaluationId = evaluation.rows[0].id;
@@ -5389,10 +5418,13 @@ app.post("/v1/skills/observations", async (req, res, next) => {
         };
         await client.query(
           `insert into policy_results (evaluation_id, policy_id, policy_name, status, severity, explanation, evidence, question)
-           values ($1, null, 'Agent skill integrity', 'needs_question', 'high', $2, $3::jsonb, $4)`,
+           values ($1, null, 'Agent skill integrity', $2, 'high', $3, $4::jsonb, $5)`,
           [
             evaluationId,
-            "A newly added or edited agent skill may contain unsafe instructions or executable behavior.",
+            monitorOnly ? "passed" : "needs_question",
+            monitorOnly
+              ? "Monitor only: a newly added or edited agent skill may contain unsafe instructions or executable behavior."
+              : "A newly added or edited agent skill may contain unsafe instructions or executable behavior.",
             JSON.stringify(
               skillScan.reasons.map((reason) =>
                 reason.quote
@@ -5400,7 +5432,7 @@ app.post("/v1/skills/observations", async (req, res, next) => {
                   : reason.reason,
               ),
             ),
-            "Delete this skill or approve it?",
+            monitorOnly ? null : "Delete this skill or approve it?",
           ],
         );
       }
@@ -5444,7 +5476,7 @@ app.post("/v1/skills/observations", async (req, res, next) => {
           severity: "high",
           title: "Suspicious skill behavior",
           summary: "Skill scanner found behavior that needs review.",
-          decision: "ask",
+          decision: skillProtectionMode === "monitor" ? "observed" : "ask",
           status,
           target: { type: "agent_skill", name: skillName },
           evidence: skillScan.reasons,
@@ -5461,7 +5493,7 @@ app.post("/v1/skills/observations", async (req, res, next) => {
           ],
         });
       }
-      if (evaluationId) {
+      if (evaluationId && skillProtectionMode !== "monitor") {
         notifyMobileApprovers(
           user.id,
           evaluationId,
@@ -6432,12 +6464,13 @@ async function readPromptTransformConfig(
   const config = normalizePromptTransformConfig(
     row.rows[0]?.config ?? defaultPromptTransformConfig,
   );
-  const [pluginSettings, userPluginSettings, policy] = await Promise.all([
+  const [pluginSettings, userPluginSettings, policy, groupIds] = await Promise.all([
     readPluginSettings(organizationId),
     userId
       ? readUserPluginSettings(organizationId, userId)
       : Promise.resolve(new Map<string, PluginSettingRecord>()),
     readOrganizationPluginPolicy(organizationId),
+    userId ? identityGroupIdsForUser(organizationId, userId) : Promise.resolve([]),
   ]);
   const effectiveTransformPlugin = (pluginId: string) => {
     const organizationStored = pluginSettings.get(pluginId);
@@ -6461,6 +6494,8 @@ async function readPromptTransformConfig(
       agentKind,
       agentId,
       projectPath,
+      userId,
+      groupIds,
       configLocked,
     });
   };
@@ -6518,11 +6553,12 @@ async function pluginCatalogForOrganization(
 ): Promise<{
   plugins: PluginCatalogItem[];
 }> {
-  const [settings, userSettings] = await Promise.all([
+  const [settings, userSettings, groupIds] = await Promise.all([
     readPluginSettings(organizationId),
     userId
       ? readUserPluginSettings(organizationId, userId)
       : Promise.resolve(new Map<string, PluginSettingRecord>()),
+    userId ? identityGroupIdsForUser(organizationId, userId) : Promise.resolve([]),
   ]);
   return {
     plugins: firstPartyPluginManifests.map((manifest) => pluginCatalogItem(
@@ -6537,6 +6573,8 @@ async function pluginCatalogForOrganization(
       options.agentId,
       options.projectPath,
       Boolean(userId),
+      userId,
+      groupIds,
     )),
   };
 }
@@ -6553,6 +6591,8 @@ function pluginCatalogItem(
   agentId?: string,
   projectPath?: string,
   userScoped = false,
+  userId?: string,
+  groupIds: string[] = [],
 ): PluginCatalogItem {
   const baseEnabled =
     userSettings?.enabled ??
@@ -6586,6 +6626,8 @@ function pluginCatalogItem(
     agentKind,
     agentId,
     projectPath,
+    userId,
+    groupIds,
     mergeArrayKeys: manifest.id === "openleash.rules-enforcer" ? ["rules"] : [],
     configLocked,
     mandatory: policy?.mandatory,
@@ -6622,6 +6664,17 @@ function pluginCatalogItem(
       updatedAt: userSettings?.updatedAt ?? organizationSettings?.updatedAt,
     },
   };
+}
+
+async function identityGroupIdsForUser(organizationId: string, userId: string) {
+  const result = await pool.query<{ id: string }>(
+    `select igm.group_id::text as id
+     from identity_group_members igm
+     join identity_groups ig on ig.id = igm.group_id
+     where ig.organization_id = $1 and igm.user_id = $2`,
+    [organizationId, userId],
+  );
+  return result.rows.map((row) => row.id);
 }
 
 function pluginManifestFromRelease(release: ReturnType<typeof pluginReleaseFromRow>): OpenLeashPluginManifest {
@@ -8070,6 +8123,10 @@ async function pluginSettingsForRuntime(
   return new Map<string, PluginSettingState>(
     plugins.map((plugin) => [plugin.id, plugin.settings]),
   );
+}
+
+function normalizeBusinessProtectionMode(value: unknown) {
+  return value === "monitor" || value === "off" ? value : "active";
 }
 
 async function validatedAgentRuntimeId(
@@ -10022,9 +10079,13 @@ function isPersonalEmailDomain(email: string) {
     "me.com",
     "mac.com",
     "yahoo.com",
+    "ymail.com",
     "proton.me",
     "protonmail.com",
     "aol.com",
+    "gmx.com",
+    "mail.com",
+    "hey.com",
   ]).has(domain);
 }
 
@@ -10490,6 +10551,7 @@ async function createDashboardSessionFromProfile({
   role = "engineer",
   provisionUser = true,
   accountAudience = "individual",
+  issueDesktopEnrollmentToken = false,
 }: {
   organizationId: string;
   providerType: string;
@@ -10497,6 +10559,7 @@ async function createDashboardSessionFromProfile({
   role?: string;
   provisionUser?: boolean;
   accountAudience?: "individual" | "organization";
+  issueDesktopEnrollmentToken?: boolean;
 }) {
   const organizationResult = await pool.query(
     `select id, name, slug, region, setup_completed, infrastructure_config from organizations where id = $1 limit 1`,
@@ -10528,6 +10591,11 @@ async function createDashboardSessionFromProfile({
      on conflict (email) do update set
        organization_id = excluded.organization_id,
        display_name = excluded.display_name,
+       role = case
+         when users.organization_id is distinct from excluded.organization_id then excluded.role
+         when users.role in ('owner', 'admin', 'ciso', 'security_admin') then users.role
+         else excluded.role
+       end,
        first_name = excluded.first_name,
        last_name = excluded.last_name,
        idp_user_id = excluded.idp_user_id,
@@ -10601,8 +10669,25 @@ async function createDashboardSessionFromProfile({
       expiresAt.toISOString(),
     ],
   );
+  const desktopEnrollmentToken = issueDesktopEnrollmentToken
+    ? `ole_${crypto.randomBytes(24).toString("base64url")}`
+    : undefined;
+  if (desktopEnrollmentToken) {
+    const enrollmentExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await pool.query(
+      `insert into dashboard_sessions (organization_id, user_id, token_hash, provider, expires_at)
+       values ($1, $2, $3, 'desktop_enrollment', $4)`,
+      [
+        organizationId,
+        userResult.rows[0].id,
+        hashToken(desktopEnrollmentToken),
+        enrollmentExpiresAt.toISOString(),
+      ],
+    );
+  }
   return {
     success: true,
+    ...(desktopEnrollmentToken ? { desktopEnrollmentToken } : {}),
     token: sessionToken,
     sessionToken,
     tokens: { accessToken: sessionToken, expiresAt: expiresAt.toISOString() },
@@ -11875,7 +11960,10 @@ function clientAssertion(
   return `${input}.${signature}`;
 }
 
-async function getDashboardSession(authHeader: string) {
+async function getDashboardSession(
+  authHeader: string,
+  purpose: "dashboard" | "desktop_enrollment" = "dashboard",
+) {
   const token = bearerToken(authHeader);
   if (!token) return null;
   const result = await pool.query<{
@@ -11889,6 +11977,7 @@ async function getDashboardSession(authHeader: string) {
     organization_slug: string;
     region: string | null;
     infrastructure_config: Record<string, unknown> | null;
+    session_provider: string;
   }>(
     `update dashboard_sessions ds
      set last_seen_at = now()
@@ -11898,12 +11987,14 @@ async function getDashboardSession(authHeader: string) {
        and ds.organization_id = u.organization_id
        and u.status = 'active'
        and ds.token_hash = $1
+       and (($2 = 'dashboard' and ds.provider <> 'desktop_enrollment')
+         or ($2 = 'desktop_enrollment' and ds.provider = 'desktop_enrollment'))
        and ds.revoked_at is null
        and ds.expires_at > now()
      returning u.id as user_id, u.email, u.display_name, u.role, u.metadata as user_metadata,
                o.id as organization_id, o.name as organization_name, o.slug as organization_slug, o.region,
-               o.infrastructure_config`,
-    [hashToken(token)],
+               o.infrastructure_config, ds.provider as session_provider`,
+    [hashToken(token), purpose],
   );
   const row = result.rows[0];
   if (!row) return null;
@@ -11933,6 +12024,7 @@ async function getDashboardSession(authHeader: string) {
       audience: accountAudience,
       packageId,
     },
+    sessionProvider: row.session_provider,
   };
 }
 

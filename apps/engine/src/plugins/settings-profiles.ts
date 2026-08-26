@@ -29,6 +29,8 @@ export function normalizePluginSettingProfiles(value: unknown): PluginSettingPro
     const projectPaths = Array.isArray(input.projectPaths)
       ? [...new Set(input.projectPaths.map(String).map(normalizeProjectPath).filter(Boolean))].slice(0, 64)
       : [];
+    const userIds = normalizedIds(input.userIds, 500);
+    const groupIds = normalizedIds(input.groupIds, 500);
     const config = input.config && typeof input.config === "object" && !Array.isArray(input.config)
       ? input.config as Record<string, unknown>
       : {};
@@ -42,6 +44,8 @@ export function normalizePluginSettingProfiles(value: unknown): PluginSettingPro
       agentKinds,
       ...(agentIds.length > 0 ? { agentIds } : {}),
       ...(projectPaths.length > 0 ? { projectPaths } : {}),
+      ...(userIds.length > 0 ? { userIds } : {}),
+      ...(groupIds.length > 0 ? { groupIds } : {}),
       ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : {}),
       config,
       ...(priority === undefined ? {} : { priority }),
@@ -57,6 +61,8 @@ export function resolvePluginSettingProfiles(input: {
   agentKind?: string;
   agentId?: string;
   projectPath?: string;
+  userId?: string;
+  groupIds?: string[];
   mergeArrayKeys?: string[];
   configLocked?: boolean;
   mandatory?: boolean;
@@ -64,7 +70,7 @@ export function resolvePluginSettingProfiles(input: {
   let enabled = input.enabled;
   let config = { ...input.config };
   const effectiveProfileIds: string[] = [];
-  if (!input.agentKind && !input.agentId && !input.projectPath) return { enabled, config, effectiveProfileIds };
+  if (!input.agentKind && !input.agentId && !input.projectPath && !input.userId && !(input.groupIds?.length)) return { enabled, config, effectiveProfileIds };
 
   const apply = (
     scope: "organization" | "user",
@@ -75,6 +81,8 @@ export function resolvePluginSettingProfiles(input: {
       if (profile.agentKinds.length > 0 && (!input.agentKind || !profile.agentKinds.includes(input.agentKind as AgentKind))) continue;
       if ((profile.agentIds?.length ?? 0) > 0 && (!input.agentId || !profile.agentIds!.includes(input.agentId))) continue;
       if ((profile.projectPaths?.length ?? 0) > 0 && !profile.projectPaths!.some((projectPath) => projectPathMatches(projectPath, input.projectPath))) continue;
+      if ((profile.userIds?.length ?? 0) > 0 && (!input.userId || !profile.userIds!.includes(input.userId))) continue;
+      if ((profile.groupIds?.length ?? 0) > 0 && !profile.groupIds!.some((groupId) => input.groupIds?.includes(groupId))) continue;
       if (allowEnabledOverride && typeof profile.enabled === "boolean") enabled = profile.enabled;
       config = mergeProfileConfig(config, profile.config, input.mergeArrayKeys ?? []);
       effectiveProfileIds.push(`${scope}:${profile.id}`);
@@ -83,6 +91,12 @@ export function resolvePluginSettingProfiles(input: {
   apply("organization", input.organizationProfiles ?? []);
   if (!input.configLocked) apply("user", input.userProfiles ?? [], !input.mandatory);
   return { enabled, config, effectiveProfileIds };
+}
+
+function normalizedIds(value: unknown, limit: number) {
+  return Array.isArray(value)
+    ? [...new Set(value.map(String).map((id) => id.trim()).filter(Boolean))].slice(0, limit)
+    : [];
 }
 
 function mergeProfileConfig(base: Record<string, unknown>, override: Record<string, unknown>, mergeArrayKeys: string[]) {
