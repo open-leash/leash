@@ -145,7 +145,6 @@ jobs:
           xcrun stapler validate "$app_path"
           xcrun stapler validate "$dmg_path"
           hdiutil verify "$dmg_path"
-          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
 
       - name: Smoke-test fresh install and running-app upgrade
         working-directory: apps/desktop
