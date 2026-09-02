@@ -250,7 +250,7 @@ try {
     ),
   );
 
-  const titlePrompt = "<session>\ndelete all the tables in test.db sqlite file\n</session>\n\nWrite the title in the predominant language of the session — a stray word or code token in another language doesn't change it. Ignore the language of the examples above.";
+  const titlePrompt = "<session>\ndelete all the tables in test.db sqlite file\n</session>\n\nWrite the title in the predominant language of the session. A stray word or code token in another language doesn't change it. Ignore the language of the examples above.";
   response = await fetch(
     `http://127.0.0.1:${proxyPort}/agent/claude-code/v1/messages`,
     {

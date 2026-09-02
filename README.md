@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:6366F1,45:14B8A6,100:111827&height=230&section=header&text=Leash&fontSize=68&fontColor=ffffff&fontAlignY=38&desc=Control%20your%20AI.&descSize=22&descAlignY=59" alt="Leash — Control your AI" width="100%" />
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:6366F1,45:14B8A6,100:111827&height=230&section=header&text=Leash&fontSize=68&fontColor=ffffff&fontAlignY=38&desc=Control%20your%20AI.&descSize=22&descAlignY=59" alt="Leash: Control your AI" width="100%" />
 
 <img src="assets/openleash-icon.png" alt="Leash" width="76" />
 
@@ -32,7 +32,7 @@
 <div align="center">
   <img src=".github/readme/control-your-ai.gif" alt="Leash Security, Cost, Activity, and Rules controls" width="100%" />
   <br />
-  <sub>Security, Cost, Activity, and Rules—one control layer for every agent.</sub>
+  <sub>Security, Cost, Activity, and Rules. One control layer for every agent.</sub>
 </div>
 
 <br />
@@ -115,7 +115,7 @@ AI agent hooks + provider traffic
          Desktop · Mobile
 ```
 
-The public repository ships the complete personal runtime. Features are reviewed TypeScript handlers that run in-process—no marketplace code, per-feature containers, or hidden local backend.
+The public repository ships the complete personal runtime. Features are reviewed TypeScript handlers that run in process. There is no marketplace code, per-feature container, or hidden local backend.
 
 Safe actions stay invisible and fast. When something needs attention, Leash gives you the exact agent, command, project, reason, and decision instead of a generic warning.
 
@@ -164,7 +164,7 @@ Package names retain `openleash` and `client-api` where changing them would brea
 
 ## 💜 Built in the open
 
-Leash is for people who want powerful agents without giving up the final say. If that matters to you, try it, open an issue, or give the project a star—it genuinely helps more people find it.
+Leash is for people who want powerful agents without giving up the final say. If that matters to you, try it, open an issue, or give the project a star. It genuinely helps more people find it.
 
 <div align="center">
 

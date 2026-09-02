@@ -4283,7 +4283,7 @@
                 <div class="setupInstallMeterTrack"><div class="setupInstallMeterFill" style="width:${percent}%"></div></div>
                 <div class="setupInstallMeterMeta">
                   <span>${escapeHtml(status === "complete" ? "Protection active" : status === "failed" ? "Installation paused" : setupInstallProgress.title || "Installing")}</span>
-                  <span>${status === "failed" ? "—" : `${Math.round(percent)}%`}</span>
+                  <span>${status === "failed" ? "-" : `${Math.round(percent)}%`}</span>
                 </div>
               </div>
               <div class="setupInstallStages" aria-label="Installation stages">
@@ -7007,7 +7007,7 @@
                   <div>
                     <span class="settingsEyebrow">Protection scope</span>
                     <h2>Projects Leash leaves alone</h2>
-                    <p>Excluded folders—and everything inside them—bypass evaluation, recording, notifications, proxy transformation, and tool gating on this Mac.</p>
+                    <p>Excluded folders, including everything inside them, bypass evaluation, recording, notifications, proxy transformation, and tool gating on this Mac.</p>
                   </div>
                   <button class="primary" id="addExcludedProject">Choose folder</button>
                 </div>
@@ -8467,7 +8467,7 @@
             </div>
             <div class="fieldRow" style="margin-top:12px">
               ${projectScoped ? `
-                <label><strong>Detected projects</strong><select class="detailSettingInput" data-profile-project-paths multiple size="${Math.max(3, Math.min(6, projects.length || 3))}" ${disabled ? "disabled" : ""}>${projects.map((project) => `<option value="${escapeHtml(project.path)}" ${(profile.projectPaths || []).map(normalizeProjectScopePath).includes(project.path) ? "selected" : ""}>${escapeHtml(project.name)} — ${escapeHtml(project.path)}</option>`).join("")}</select><small>${projects.length ? "Select one or more projects Leash has seen." : "No projects detected yet; add a path below."}</small></label>
+                <label><strong>Detected projects</strong><select class="detailSettingInput" data-profile-project-paths multiple size="${Math.max(3, Math.min(6, projects.length || 3))}" ${disabled ? "disabled" : ""}>${projects.map((project) => `<option value="${escapeHtml(project.path)}" ${(profile.projectPaths || []).map(normalizeProjectScopePath).includes(project.path) ? "selected" : ""}>${escapeHtml(project.name)}: ${escapeHtml(project.path)}</option>`).join("")}</select><small>${projects.length ? "Select one or more projects Leash has seen." : "No projects detected yet; add a path below."}</small></label>
                 <label><strong>Add project paths manually</strong><textarea class="detailSettingInput" data-profile-manual-project-paths placeholder="/Users/you/Code/my-project" ${disabled ? "disabled" : ""}>${escapeHtml(manualPaths.join("\n"))}</textarea><small>One project root per line. Work inside subfolders also matches.</small></label>
               ` : `
                 <label><strong>Agent types</strong><select class="detailSettingInput" data-profile-agent-kinds multiple size="5" ${disabled ? "disabled" : ""}>${profileAgentKinds.map((kind) => `<option value="${kind}" ${(profile.agentKinds || []).includes(kind) ? "selected" : ""}>${escapeHtml(settingLabel(kind))}</option>`).join("")}</select><small>No selection means every agent type.</small></label>

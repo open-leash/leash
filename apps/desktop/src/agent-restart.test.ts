@@ -53,7 +53,7 @@ test("extracts open project names from IDE status output", () => {
     0 100 window [1] (FileMesh (All))
     0 100 window [2] (OL2)
   Workspace Stats:
-  |  Window (Welcome — Hi)
+  |  Window (Welcome - Hi)
   |  Folder (FileMesh (All)): 900 files
   |  Folder (OL2): 1200 files
   `), [

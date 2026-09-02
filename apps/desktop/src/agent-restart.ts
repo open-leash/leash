@@ -87,7 +87,7 @@ export function parseIdeProjects(value: string): RestartProject[] {
     if (folder) return [folder[1].trim()];
     const window = line.match(/^\s*\d*\s*\|?\s*window(?:\s+\[\d+\])?\s+\((.+?)\)\s*$/i);
     if (!window) return [];
-    const name = window[1].replace(/^(?:Welcome|Browser)\s+[—-]\s+/i, "").trim();
+    const name = window[1].replace(/^(?:Welcome|Browser)\s+-\s+/i, "").trim();
     return name && name.toLowerCase() !== "welcome" ? [name] : [];
   });
   return [...new Set(names)].map((name) => ({ name }));

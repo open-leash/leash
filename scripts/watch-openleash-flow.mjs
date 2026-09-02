@@ -62,7 +62,7 @@ function printRecord(record) {
   if (record.runs)
     for (const run of record.runs)
       console.log(
-        `  plugin ${run.pluginId}: ${run.status}${run.summary ? ` — ${run.summary}` : ""}`,
+        `  plugin ${run.pluginId}: ${run.status}${run.summary ? `. ${run.summary}` : ""}`,
       );
   if (full) {
     const details = { ...record };

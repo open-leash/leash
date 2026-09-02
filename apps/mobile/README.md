@@ -57,7 +57,7 @@ work while the app is running.
 
 Responses are stored by Engine, then consumed by the request that
 originally paused. A desktop hook or proxy therefore resumes only its own local
-agent. A cloud or SaaS agent is resumed by its own server-side request—mobile
+agent. A cloud or SaaS agent is resumed by its own server-side request. Mobile
 never sends an executable command to an unrelated desktop.
 
 Business membership does not turn Mobile into an admin console. Employees and

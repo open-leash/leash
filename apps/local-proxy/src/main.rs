@@ -1826,7 +1826,7 @@ mod tests {
         let request = json!({
             "messages": [{
                 "role": "user",
-                "content": "<session>\ndelete all the tables in test.db sqlite file\n</session>\n\nWrite the title in the predominant language of the session — a stray word or code token in another language doesn't change it. Ignore the language of the examples above."
+                "content": "<session>\ndelete all the tables in test.db sqlite file\n</session>\n\nWrite the title in the predominant language of the session. A stray word or code token in another language doesn't change it. Ignore the language of the examples above."
             }]
         });
         assert!(is_background_control_request("claude-code", &request));

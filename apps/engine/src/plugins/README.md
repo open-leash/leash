@@ -434,7 +434,7 @@ if (!previous) {
 ```
 
 Treat it as a bounded plugin document API for preferences, checkpoints, or
-deduplication—not as a generic database and not as the normal conversation
+deduplication, not as a generic database or as the normal conversation
 history path. Values are JSON, each value is capped at 256 KiB, keys are capped
 at 240 characters, lists are bounded, and plugins cannot run SQL or join
 OpenLeash product tables.

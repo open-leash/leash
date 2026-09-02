@@ -1079,7 +1079,7 @@ class _LeashHomeState extends State<LeashHome> {
     final trial = _billing?['trial'];
     if (trial is! Map) return null;
     if (_billing?['upgradeRequired'] == true) {
-      return 'Cloud trial ended — upgrade required';
+      return 'Cloud trial ended. Upgrade required';
     }
     if (trial['active'] == true) {
       return 'Cloud trial: ${trial['daysRemaining']} days left';

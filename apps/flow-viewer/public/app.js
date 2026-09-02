@@ -247,7 +247,7 @@ function formatTime(value) {
         minute: "2-digit",
         second: "2-digit",
       })
-    : "—";
+    : "-";
 }
 function short(value, n) {
   value = String(value || "");
