@@ -29,6 +29,10 @@ import {
   normalizeExcludedProjectPaths,
   projectPathIsExcluded,
 } from "./project-exclusions";
+import {
+  AvailabilityCircuitBreaker,
+  isAvailabilityHttpStatus,
+} from "./availability-circuit";
 
 const ACTION_PURPOSE_CONTEXT_MESSAGES = Number(process.env.OPENLEASH_ACTION_PURPOSE_MESSAGES ?? 5);
 type ClientMode = "personal" | "cloud" | "custom";
@@ -63,6 +67,18 @@ function configuredDesktopToken(existing?: string) {
   return configuredDesktopTokenFromEnvironment()
     ?? existing
     ?? `ol_personal_${crypto.randomBytes(18).toString("base64url")}`;
+}
+
+function localUserDisplayName() {
+  const configured = String(process.env.OPENLEASH_LOCAL_USER_NAME ?? "").trim();
+  if (configured) return configured;
+  const username = String(os.userInfo().username || "").trim();
+  if (!username) return "Local user";
+  return username
+    .split(/[._-]+/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function normalizeClientMode(value?: ClientMode | string): ClientMode {
@@ -249,6 +265,7 @@ type Store = {
   token: string;
   setupComplete: boolean;
   installIdentity?: string;
+  deviceIdentity?: string;
   introSeen?: boolean;
   agentDoneSound?: boolean;
   islandVisibility?: IslandVisibility;
@@ -364,6 +381,18 @@ export class LocalOpenLeashServer {
   private pluginRuntimeStatuses: Array<{ pluginId: string; healthy: boolean; error?: string }> = [];
   private readonly sessionMonitoringPauses = new SessionMonitoringPauses();
   private readonly excludedProjectSessions = new Map<string, number>();
+  private readonly remoteAvailability = new AvailabilityCircuitBreaker({
+    failureThreshold: Number(
+      // A hung request is classified only after two independent readiness
+      // probes fail. Once that confirmed outage reaches the edge, opening on
+      // the first failed action prevents a second agent action from waiting on
+      // the same dead Cloud path.
+      process.env.OPENLEASH_AVAILABILITY_FAILURE_THRESHOLD ?? 1,
+    ),
+    openDurationMs: Number(
+      process.env.OPENLEASH_AVAILABILITY_OPEN_MS ?? 30_000,
+    ),
+  });
 
   constructor(private readonly dir: string, private readonly options: LocalServerOptions = {}) {
     fs.mkdirSync(dir, { recursive: true });
@@ -452,6 +481,12 @@ export class LocalOpenLeashServer {
     return this.store.remoteApiUrl;
   }
 
+  get availabilityFailOpen() {
+    return this.store.clientMode === "cloud" && Boolean(
+      this.store.remoteApiUrl && this.store.remoteToken,
+    );
+  }
+
   get remoteOrganization() {
     return this.store.remoteOrganization;
   }
@@ -497,6 +532,7 @@ export class LocalOpenLeashServer {
       token: configuredDesktopToken(this.store?.token),
       setupComplete: false,
       installIdentity: this.store?.installIdentity,
+      deviceIdentity: this.store?.deviceIdentity,
       introSeen,
       agentDoneSound: this.store?.agentDoneSound ?? true,
       islandVisibility: this.islandVisibility,
@@ -538,6 +574,13 @@ export class LocalOpenLeashServer {
 
   installIdentity() {
     return this.settingValue("installIdentity");
+  }
+
+  deviceIdentity() {
+    if (this.store.deviceIdentity) return this.store.deviceIdentity;
+    this.store.deviceIdentity = crypto.randomUUID();
+    this.writeStore();
+    return this.store.deviceIdentity;
   }
 
   rememberInstallIdentity(identity: string) {
@@ -771,15 +814,26 @@ export class LocalOpenLeashServer {
     try {
       const functionName = localApiFunction(req.method ?? "", req.url ?? "");
       if (functionName && !applyLocalContract(req, res, functionName)) return;
-      if (req.method === "GET" && req.url === "/health") return json(res, { ok: true, mode: this.clientMode });
+      if (req.method === "GET" && req.url === "/health") return json(res, {
+        ok: true,
+        mode: this.clientMode,
+        availability: this.remoteAvailability.snapshot(),
+      });
       const oauthCallback = new URL(req.url ?? "/", this.apiUrl);
       if (req.method === "GET" && this.redirectOAuthCallback(oauthCallback, res)) return;
+      // Every local API surface after health and the browser OAuth return is a
+      // private Desktop control-plane endpoint. Binding to loopback is not an
+      // authentication boundary: other local processes (and browsers through
+      // cross-origin requests) can still reach it. Agent hooks receive this
+      // per-install token through their protected configuration.
+      if (!this.isAuthorizedLocalClient(req)) {
+        return json(res, { error: "unauthorized" }, 401);
+      }
       if (req.method === "GET" && req.url === "/admin/tray-status") return json(res, this.trayStatus());
       if (req.method === "GET" && req.url === "/personal/state") {
         return json(res, {
           setupComplete: this.setupComplete,
           introSeen: this.introSeen,
-          token: this.store.token,
           clientMode: this.clientMode,
           agentDoneSound: this.agentDoneSound,
           islandVisibility: this.islandVisibility,
@@ -820,7 +874,6 @@ export class LocalOpenLeashServer {
         return json(res, await this.evaluate(request));
       }
       if (req.method === "POST" && req.url === "/v1/plugin-runtime/transform") {
-        if (!this.isAuthorizedLocalClient(req)) return json(res, { error: "unauthorized" }, 401);
         const body = await readJson(req) as {
           provider?: string;
           agentKind?: string;
@@ -862,7 +915,6 @@ export class LocalOpenLeashServer {
         return json(res, { features: this.pluginRuntimeStatuses, containers: [] });
       }
       if (req.method === "POST" && req.url === "/v1/plugin-runtime/tools/execute") {
-        if (!this.isAuthorizedLocalClient(req)) return json(res, { error: "unauthorized" }, 401);
         const body = await readJson(req) as { pluginId?: string; sessionId?: string; tool?: string; arguments?: Record<string, unknown> };
         const plugin = this.store.plugins.find((candidate) => candidate.id === body.pluginId);
         if (!plugin) return json(res, { error: "enabled plugin not found" }, 404);
@@ -910,7 +962,11 @@ export class LocalOpenLeashServer {
           this.notifyAgentStop(hookMatch[1], hookMatch[2], body);
           return json(res, remoteDecision);
         }
-        return json(res, backendUnavailableHookDecision(hookMatch[1], hookMatch[2]));
+        return json(res, backendUnavailableHookDecision(
+          hookMatch[1],
+          hookMatch[2],
+          this.availabilityFailOpen,
+        ));
       }
       const decision = req.url?.match(/^\/v1\/decisions\/([^/]+)$/);
       if (req.method === "GET" && decision) {
@@ -925,7 +981,8 @@ export class LocalOpenLeashServer {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     } catch (error) {
-      res.writeHead(500, { "content-type": "application/json" });
+      const status = error instanceof RemoteApiError ? error.status : 500;
+      res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : "unknown error" }));
     }
   }
@@ -934,13 +991,9 @@ export class LocalOpenLeashServer {
     const authorization = String(req.headers.authorization ?? "");
     const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
     if (!token) return false;
-    return [this.store.token, this.store.remoteToken]
-      .filter((candidate): candidate is string => Boolean(candidate))
-      .some((candidate) => {
-        const actual = Buffer.from(token);
-        const expected = Buffer.from(candidate);
-        return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
-      });
+    const actual = Buffer.from(token);
+    const expected = Buffer.from(this.store.token);
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
   }
 
   private notifyAgentActivity(value: unknown) {
@@ -1052,7 +1105,7 @@ export class LocalOpenLeashServer {
       question: decision === "ask" ? nativeInteraction?.question ?? `${summary} Allow this action once?` : undefined,
       created_at: new Date().toISOString(),
       resolved_at: decision === "allow" ? new Date().toISOString() : undefined,
-      user_name: "Max Brin",
+      user_name: localUserDisplayName(),
       hostname: request.computer.hostname || os.hostname(),
       agent_name: request.agent.displayName,
       agent_kind: request.agent.kind,
@@ -1105,7 +1158,7 @@ export class LocalOpenLeashServer {
       summary: result.summary,
       created_at: new Date().toISOString(),
       resolved_at: result.requiresApproval ? undefined : new Date().toISOString(),
-      user_name: "Max Brin",
+      user_name: localUserDisplayName(),
       hostname: request.computer.hostname || os.hostname(),
       agent_name: request.agent.displayName,
       agent_kind: request.agent.kind,
@@ -1138,15 +1191,14 @@ export class LocalOpenLeashServer {
 
   private async forwardRemoteHook(agent: string, eventName: string, body: unknown, originalUrl: string) {
     if (!this.store.remoteApiUrl || !this.store.remoteToken) return undefined;
+    if (!this.remoteAvailability.canAttempt()) return undefined;
     this.options.onRemoteHookForward?.({ agent, eventName, body });
-    try {
-      const endpoint = new URL(`/v1/hooks/${agent}/${eventName}`, this.store.remoteApiUrl.replace(/\/+$/, ""));
-      const query = new URL(originalUrl, "http://127.0.0.1").searchParams;
-      for (const [key, value] of query.entries()) {
-        if (key !== "user_token" && key !== "token") endpoint.searchParams.set(key, value);
-      }
-      endpoint.searchParams.set("user_token", this.store.remoteToken);
-      const response = await fetch(endpoint, {
+    const endpoint = new URL(`/v1/hooks/${agent}/${eventName}`, this.store.remoteApiUrl.replace(/\/+$/, ""));
+    const query = new URL(originalUrl, "http://127.0.0.1").searchParams;
+    for (const [key, value] of query.entries()) {
+      if (key !== "user_token" && key !== "token") endpoint.searchParams.set(key, value);
+    }
+    const response = await this.fetchRemoteOrUnavailable(endpoint, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -1157,36 +1209,90 @@ export class LocalOpenLeashServer {
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(Number(process.env.OPENLEASH_REMOTE_HOOK_TIMEOUT_MS ?? 610000))
       });
-      if (!response.ok) return undefined;
-      return await response.json() as unknown;
+    if (!response) return undefined;
+    if (!response.ok) {
+      if (isAvailabilityHttpStatus(response.status)) {
+        this.remoteAvailability.recordAvailabilityFailure(
+          `Leash Cloud returned HTTP ${response.status}`,
+        );
+        return undefined;
+      }
+      this.remoteAvailability.recordNonAvailabilityFailure();
+      return nativeHookDecision(agent, eventName, {
+        decision: "deny",
+        summary: `Leash Cloud rejected this request (HTTP ${response.status}). Sign in again or contact your administrator.`,
+      });
+    }
+    try {
+      const decision = await response.json() as unknown;
+      this.remoteAvailability.recordSuccess();
+      return decision;
     } catch {
-      return undefined;
+      this.remoteAvailability.recordNonAvailabilityFailure();
+      return nativeHookDecision(agent, eventName, {
+        decision: "deny",
+        summary:
+          "Leash Cloud returned an invalid policy response. The action was held for safety.",
+      });
     }
   }
 
   private async forwardRemoteAgentEvent(body: unknown) {
     if (!this.store.remoteApiUrl || !this.store.remoteToken) {
-      throw new Error("Leash backend is unavailable");
+      throw new RemoteApiError(401, "Leash backend credentials are unavailable");
     }
-    const response = await fetch(new URL("/v1/agent-events", this.store.remoteApiUrl.replace(/\/+$/, "")), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.store.remoteToken}`,
-        "content-type": "application/json",
+    if (!this.remoteAvailability.canAttempt()) {
+      if (this.availabilityFailOpen) return backendUnavailableProxyDecision();
+      throw new RemoteApiError(503, "Leash protection backend is unavailable");
+    }
+    const response = await this.fetchRemoteOrUnavailable(
+      new URL("/v1/agent-events", this.store.remoteApiUrl.replace(/\/+$/, "")),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.store.remoteToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(120_000),
       },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
-    });
+    );
+    if (!response) {
+      if (this.availabilityFailOpen) return backendUnavailableProxyDecision();
+      throw new RemoteApiError(503, "Leash protection backend is unavailable");
+    }
     const result = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-    if (!response.ok) throw new Error((result as { error?: string }).error ?? `Leash backend returned HTTP ${response.status}`);
+    if (!response.ok) {
+      if (isAvailabilityHttpStatus(response.status)) {
+        this.remoteAvailability.recordAvailabilityFailure(
+          `Leash Cloud returned HTTP ${response.status}`,
+        );
+        if (this.availabilityFailOpen) return backendUnavailableProxyDecision();
+        throw new RemoteApiError(
+          response.status,
+          `Leash protection backend returned HTTP ${response.status}`,
+        );
+      }
+      this.remoteAvailability.recordNonAvailabilityFailure();
+      throw new RemoteApiError(
+        response.status,
+        (result as { error?: string }).error ??
+          `Leash backend returned HTTP ${response.status}`,
+      );
+    }
+    this.remoteAvailability.recordSuccess();
     return result;
   }
 
   private async forwardRemoteFeatureRuntime(pathname: string, body: unknown) {
     if (!this.store.remoteApiUrl || !this.store.remoteToken) {
-      throw new Error("Leash backend is unavailable");
+      throw new RemoteApiError(401, "Leash backend credentials are unavailable");
     }
-    const response = await fetch(
+    if (!this.remoteAvailability.canAttempt()) {
+      if (this.availabilityFailOpen) return backendUnavailableTransformDecision(body);
+      throw new RemoteApiError(503, "Leash protection backend is unavailable");
+    }
+    const response = await this.fetchRemoteOrUnavailable(
       new URL(pathname, this.store.remoteApiUrl.replace(/\/+$/, "")),
       {
         method: "POST",
@@ -1198,11 +1304,109 @@ export class LocalOpenLeashServer {
         signal: AbortSignal.timeout(120_000),
       },
     );
+    if (!response) {
+      if (this.availabilityFailOpen) return backendUnavailableTransformDecision(body);
+      throw new RemoteApiError(503, "Leash protection backend is unavailable");
+    }
     const result = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
     if (!response.ok) {
-      throw new Error((result as { error?: string }).error ?? `Leash backend returned HTTP ${response.status}`);
+      if (isAvailabilityHttpStatus(response.status)) {
+        this.remoteAvailability.recordAvailabilityFailure(
+          `Leash Cloud returned HTTP ${response.status}`,
+        );
+        if (this.availabilityFailOpen) return backendUnavailableTransformDecision(body);
+        throw new RemoteApiError(
+          response.status,
+          `Leash protection backend returned HTTP ${response.status}`,
+        );
+      }
+      this.remoteAvailability.recordNonAvailabilityFailure();
+      throw new RemoteApiError(
+        response.status,
+        (result as { error?: string }).error ??
+          `Leash backend returned HTTP ${response.status}`,
+      );
     }
+    this.remoteAvailability.recordSuccess();
     return result;
+  }
+
+  private async fetchRemoteOrUnavailable(
+    input: URL,
+    init: RequestInit,
+  ) {
+    const controller = new AbortController();
+    const upstreamSignal = init.signal;
+    const forwardAbort = () => controller.abort(upstreamSignal?.reason);
+    upstreamSignal?.addEventListener("abort", forwardAbort, { once: true });
+    let completed = false;
+    let readinessFailure: string | undefined;
+    void this.watchRemoteReadiness(
+      input.origin,
+      controller,
+      () => completed,
+      (reason) => {
+        readinessFailure = reason;
+      },
+    );
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (!readinessFailure && !isAvailabilityTransportError(error)) {
+        this.remoteAvailability.recordNonAvailabilityFailure();
+        throw error;
+      }
+      this.remoteAvailability.recordAvailabilityFailure(
+        readinessFailure ??
+          (error instanceof Error ? error.message : "Leash Cloud request failed"),
+      );
+      return undefined;
+    } finally {
+      completed = true;
+      upstreamSignal?.removeEventListener("abort", forwardAbort);
+    }
+  }
+
+  private async watchRemoteReadiness(
+    remoteOrigin: string,
+    controller: AbortController,
+    completed: () => boolean,
+    onFailure: (reason: string) => void,
+  ) {
+    const graceMs = Math.max(
+      50,
+      Number(process.env.OPENLEASH_REMOTE_READINESS_GRACE_MS ?? 3_000),
+    );
+    const intervalMs = Math.max(
+      50,
+      Number(process.env.OPENLEASH_REMOTE_READINESS_INTERVAL_MS ?? 7_000),
+    );
+    const probeTimeoutMs = Math.max(
+      50,
+      Number(process.env.OPENLEASH_REMOTE_READINESS_TIMEOUT_MS ?? 1_500),
+    );
+    await waitForReadinessProbe(graceMs);
+    let consecutiveFailures = 0;
+    while (!completed() && !controller.signal.aborted) {
+      try {
+        const response = await fetch(new URL("/cloud/readiness", remoteOrigin), {
+          signal: AbortSignal.timeout(probeTimeoutMs),
+        });
+        // A non-availability 4xx still proves that the service is reachable;
+        // only the same narrow classes used by the circuit count as outages.
+        consecutiveFailures = isAvailabilityHttpStatus(response.status) ? consecutiveFailures + 1 : 0;
+      } catch (error) {
+        if (isAvailabilityTransportError(error)) consecutiveFailures += 1;
+        else consecutiveFailures = 0;
+      }
+      if (consecutiveFailures >= 2 && !completed()) {
+        const reason = "Leash Cloud readiness failed twice while evaluation was pending";
+        onFailure(reason);
+        controller.abort(new Error(reason));
+        return;
+      }
+      await waitForReadinessProbe(intervalMs);
+    }
   }
 
   private notifyAgentStop(agent: string, eventName: string, body: unknown) {
@@ -1289,6 +1493,7 @@ export class LocalOpenLeashServer {
     return {
       pending,
       session_metrics,
+      availability: this.remoteAvailability.snapshot(),
       agents: [...latestByAgent.values()].slice(0, 12).map((item) => ({
         id: `${item.agent_kind}:${item.hostname}`,
         decision_id: item.id,
@@ -1388,6 +1593,7 @@ export class LocalOpenLeashServer {
       token,
       setupComplete: this.getSetting("setupComplete") === "true",
       installIdentity: this.settingValue("installIdentity"),
+      deviceIdentity: this.settingValue("deviceIdentity"),
       introSeen: this.getSetting("introSeen") === "true",
       agentDoneSound: this.getSetting("agentDoneSound") !== "false",
       islandVisibility: normalizeIslandVisibility(
@@ -1523,6 +1729,7 @@ export class LocalOpenLeashServer {
       insertSetting.run("token", store.token);
       insertSetting.run("setupComplete", String(store.setupComplete));
       if (store.installIdentity) insertSetting.run("installIdentity", store.installIdentity);
+      if (store.deviceIdentity) insertSetting.run("deviceIdentity", store.deviceIdentity);
       insertSetting.run("introSeen", String(Boolean(store.introSeen)));
       insertSetting.run("agentDoneSound", String(Boolean(store.agentDoneSound)));
       insertSetting.run("islandVisibility", normalizeIslandVisibility(store.islandVisibility, Boolean(store.islandActivityOnly)));
@@ -1907,6 +2114,7 @@ export class LocalOpenLeashServer {
           ? Boolean(parsed.setupComplete && parsed.remoteToken)
           : Boolean(parsed.setupComplete),
         installIdentity: parsed.installIdentity,
+        deviceIdentity: parsed.deviceIdentity,
         clientMode: parsedClientMode,
         agentDoneSound: Boolean(parsed.agentDoneSound),
         islandVisibility: normalizeIslandVisibility(
@@ -3008,14 +3216,88 @@ function nativeHookDecision(agent: string, eventName: string, decision: { decisi
   };
 }
 
-function backendUnavailableHookDecision(agent: string, eventName: string) {
-  const unavailableDecision = process.env.OPENLEASH_BACKEND_UNAVAILABLE_DECISION === "deny" ? "deny" : "allow";
+function backendUnavailableHookDecision(
+  agent: string,
+  eventName: string,
+  failOpen: boolean,
+) {
+  const unavailableDecision = failOpen && process.env.OPENLEASH_BACKEND_UNAVAILABLE_DECISION !== "deny"
+    ? "allow"
+    : "deny";
   return nativeHookDecision(agent, eventName, {
     decision: unavailableDecision,
     summary: unavailableDecision === "deny"
       ? "Leash backend is unavailable. Connect to Leash Cloud or your personal API before continuing."
       : "Leash backend is unavailable. Leash allowed this action without remote policy evaluation."
   });
+}
+
+function isAvailabilityTransportError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const code = cause && typeof cause === "object"
+    ? String((cause as { code?: unknown }).code ?? "")
+    : "";
+  return new Set([
+    "ECONNABORTED",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "EHOSTUNREACH",
+    "ENETDOWN",
+    "ENETUNREACH",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "ETIMEDOUT",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_SOCKET",
+  ]).has(code);
+}
+
+function backendUnavailableProxyDecision() {
+  return {
+    decision: "allow" as const,
+    decisionId: "availability-bypass",
+    summary:
+      "Leash Cloud is temporarily unavailable. Leash allowed this action in degraded mode.",
+    results: [],
+    degraded: true,
+  };
+}
+
+function backendUnavailableTransformDecision(body: unknown) {
+  const requestBody = body && typeof body === "object" && !Array.isArray(body)
+    ? (body as { requestBody?: unknown }).requestBody
+    : undefined;
+  return {
+    protocol: "openleash-container-plugin.v1",
+    requestBody:
+      requestBody && typeof requestBody === "object" && !Array.isArray(requestBody)
+        ? requestBody
+        : {},
+    appliedPluginIds: [],
+    runs: [],
+    monitoringPaused: true,
+    degraded: true,
+  };
+}
+
+function waitForReadinessProbe(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+  });
+}
+
+class RemoteApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RemoteApiError";
+  }
 }
 
 function promptTransformHookDecision(agent: string, eventName: string, prompt: string, summary: string) {
@@ -3237,7 +3519,7 @@ function applyLocalContract(req: http.IncomingMessage, res: http.ServerResponse,
   res.setHeader(OPENLEASH_API_VERSION_HEADER, version);
   const requested = req.headers[OPENLEASH_API_VERSION_HEADER] as string | undefined;
   if (requested && requested !== version) {
-    res.writeHead(426, { "content-type": "application/json", "access-control-allow-origin": "*" });
+    res.writeHead(426, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "unsupported Leash API contract version", function: functionName, expectedVersion: version, receivedVersion: requested }));
     return false;
   }
@@ -3245,6 +3527,6 @@ function applyLocalContract(req: http.IncomingMessage, res: http.ServerResponse,
 }
 
 function json(res: http.ServerResponse, body: unknown, status = 200) {
-  res.writeHead(status, { "content-type": "application/json", "access-control-allow-origin": "*" });
+  res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
 }

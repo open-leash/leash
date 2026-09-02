@@ -5,13 +5,13 @@ import test from "node:test";
 
 const mainSource = fs.readFileSync(path.join(process.cwd(), "src", "main.ts"), "utf8");
 
-test("cloud hook configuration uses the effective remote token", () => {
+test("agent hook configuration uses only the loopback credential", () => {
   const configureBlock = mainSource.match(
     /async function configureLocalAgent\(\) \{([\s\S]*?)\n\}/,
   )?.[1];
   assert.ok(configureBlock, "configureLocalAgent is present");
-  assert.match(configureBlock, /token:\s*localServer\.effectiveToken/);
-  assert.doesNotMatch(configureBlock, /token:\s*localServer\.token[,\n]/);
+  assert.match(configureBlock, /token:\s*localServer\.token/);
+  assert.doesNotMatch(configureBlock, /token:\s*localServer\.effectiveToken/);
 });
 
 test("an app update restores every previously protected agent", () => {

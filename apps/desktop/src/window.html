@@ -3909,6 +3909,42 @@
         .settingsControl { grid-template-columns: 1fr; }
         .settingsPage select { width: 100%; min-width: 0; }
       }
+      .availabilityBanner {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+        margin: 0 0 18px;
+        padding: 13px 16px;
+        border: 1px solid #f1c66c;
+        border-radius: 16px;
+        background: linear-gradient(115deg, #fff8e7, #fffdf8);
+        color: #533500;
+        box-shadow: 0 10px 28px rgba(128, 79, 0, .08);
+      }
+      .availabilityBanner span:nth-child(2) { display: grid; gap: 2px; }
+      .availabilityBanner strong { font-size: 14px; line-height: 1.25; }
+      .availabilityBanner small { color: #76591d; font-size: 12px; line-height: 1.4; }
+      .availabilityBanner > b {
+        padding: 6px 9px;
+        border-radius: 999px;
+        background: rgba(255, 185, 50, .18);
+        font-size: 11px;
+        letter-spacing: .03em;
+      }
+      .availabilityPulse {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #e59600;
+        box-shadow: 0 0 0 5px rgba(229, 150, 0, .14);
+        animation: availabilityPulse 1.4s ease-in-out infinite;
+      }
+      @keyframes availabilityPulse { 50% { box-shadow: 0 0 0 9px rgba(229, 150, 0, 0); } }
+      @media (max-width: 720px) {
+        .availabilityBanner { grid-template-columns: auto minmax(0, 1fr); }
+        .availabilityBanner > b { display: none; }
+      }
     </style>
   </head>
   <body>
@@ -4072,6 +4108,7 @@
         if (isSetupSurfaceActive()) return renderSetup();
         importedRules = undefined;
         renderView();
+        renderAvailabilityBanner();
         autosizeRuleTextareas();
         if (view === "debug" && mainScroller) {
           mainScroller.scrollTop = preservedLogScrollTop;
@@ -4108,6 +4145,20 @@
 
       function modeTag() {
         return `<span class="tag good">${escapeHtml(modeLabel())}</span>`;
+      }
+
+      function renderAvailabilityBanner() {
+        root.querySelector(".availabilityBanner")?.remove();
+        if (state.clientMode !== "cloud" || !state.availability?.degraded) return;
+        const banner = document.createElement("section");
+        banner.className = "availabilityBanner";
+        banner.setAttribute("role", "status");
+        banner.innerHTML = `
+          <span class="availabilityPulse" aria-hidden="true"></span>
+          <span><strong>Cloud protection is temporarily unavailable</strong><small>Your agents keep working in degraded mode while Leash reconnects automatically. Supported actions are not being remotely evaluated right now.</small></span>
+          <b>Reconnecting</b>
+        `;
+        root.prepend(banner);
       }
 
       function headerIdentityHtml() {

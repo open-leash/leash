@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 const apiPort = 19418;
 const upstreamPort = 19419;
 const proxyPort = 19420;
+const availabilityProxyPort = 19421;
 let captured;
 let capturedApi;
 const apiEvents = [];
@@ -25,6 +26,10 @@ const api = http.createServer(async (req, res) => {
   apiEvents.push(body);
   const prompt = body.request?.event?.prompt || "";
   const toolInput = JSON.stringify(body.request?.event?.tool?.input ?? "");
+  if (toolInput.includes("AUTH_TOOL")) {
+    res.statusCode = 401;
+    return res.end("invalid Leash session");
+  }
   if (toolInput.includes("ERROR_TOOL")) {
     res.statusCode = 503;
     return res.end("evaluator unavailable");
@@ -108,7 +113,13 @@ const upstream = http.createServer(async (req, res) => {
     );
   }
   if (
-    ["blocked-tool", "delayed-tool", "error-tool", "timeout-tool"].includes(
+    [
+      "blocked-tool",
+      "delayed-tool",
+      "error-tool",
+      "timeout-tool",
+      "auth-tool",
+    ].includes(
       parsed.model,
     )
   ) {
@@ -119,7 +130,9 @@ const upstream = http.createServer(async (req, res) => {
           ? "ERROR_TOOL"
           : parsed.model === "timeout-tool"
             ? "TIMEOUT_TOOL"
-            : "DELAY_TOOL";
+            : parsed.model === "auth-tool"
+              ? "AUTH_TOOL"
+              : "DELAY_TOOL";
     if (parsed.stream) {
       res.setHeader("content-type", "text/event-stream");
       res.write(
@@ -174,27 +187,8 @@ const upstream = http.createServer(async (req, res) => {
 });
 
 await Promise.all([listen(api, apiPort), listen(upstream, upstreamPort)]);
-const proxy = spawn(
-  "cargo",
-  ["run", "--quiet", "--manifest-path", "apps/local-proxy/Cargo.toml", "--"],
-  {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      OPENLEASH_PROXY_LISTEN: `127.0.0.1:${proxyPort}`,
-      OPENLEASH_CLIENT_API: `http://127.0.0.1:${apiPort}`,
-      OPENLEASH_TOKEN: "test",
-      OPENLEASH_OPENAI_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-      OPENLEASH_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-      OPENLEASH_PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-      OPENLEASH_PROXY_MAX_BODY_BYTES: "512",
-      OPENLEASH_PROXY_MAX_GATED_RESPONSE_BYTES: "2048",
-      OPENLEASH_PROXY_MAX_CONCURRENT_GATES: "1",
-      OPENLEASH_PROXY_EVALUATION_TIMEOUT_SECONDS: "1",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  },
-);
+const proxy = spawnProxy(proxyPort, false);
+let availabilityProxy;
 
 try {
   await waitForHealth();
@@ -577,9 +571,49 @@ try {
     (await fetch(`http://127.0.0.1:${proxyPort}/healthz/upstream`)).status,
     200,
   );
+
+  availabilityProxy = spawnProxy(availabilityProxyPort, true);
+  await waitForHealth(availabilityProxyPort);
+
+  response = await fetch(
+    `http://127.0.0.1:${availabilityProxyPort}/agent/cursor/v1/chat/completions`,
+    toolRequest("error-tool"),
+  );
+  assert.equal(response.status, 200, "managed proxy must bypass a Cloud 5xx");
+  assert.match(await response.text(), /ERROR_TOOL/);
+
+  response = await fetch(
+    `http://127.0.0.1:${availabilityProxyPort}/agent/cursor/v1/chat/completions`,
+    toolRequest("timeout-tool"),
+  );
+  assert.equal(response.status, 200, "managed proxy must bypass a timeout");
+  assert.match(await response.text(), /TIMEOUT_TOOL/);
+
+  response = await fetch(
+    `http://127.0.0.1:${availabilityProxyPort}/agent/cursor/v1/chat/completions`,
+    toolRequest("blocked-tool"),
+  );
+  assert.equal(response.status, 403, "an explicit deny must never be bypassed");
+  assert.doesNotMatch(await response.text(), /BLOCK_TOOL/);
+
+  response = await fetch(
+    `http://127.0.0.1:${availabilityProxyPort}/agent/cursor/v1/chat/completions`,
+    toolRequest("auth-tool"),
+  );
+  assert.equal(response.status, 503, "an authentication failure must fail closed");
+  assert.doesNotMatch(await response.text(), /AUTH_TOOL/);
+
+  const availabilityMetrics = await (
+    await fetch(`http://127.0.0.1:${availabilityProxyPort}/metrics`)
+  ).text();
+  assert.match(
+    availabilityMetrics,
+    /openleash_proxy_availability_bypasses_total 2/,
+  );
   console.log("Leash local proxy integration tests passed");
 } finally {
   proxy.kill("SIGTERM");
+  availabilityProxy?.kill("SIGTERM");
   api.close();
   upstream.close();
 }
@@ -595,10 +629,34 @@ function read(req) {
     req.on("error", reject);
   });
 }
-async function waitForHealth() {
+function spawnProxy(port, failOpen) {
+  return spawn(
+    "cargo",
+    ["run", "--quiet", "--manifest-path", "apps/local-proxy/Cargo.toml", "--"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        OPENLEASH_PROXY_LISTEN: `127.0.0.1:${port}`,
+        OPENLEASH_CLIENT_API: `http://127.0.0.1:${apiPort}`,
+        OPENLEASH_TOKEN: "test",
+        OPENLEASH_OPENAI_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
+        OPENLEASH_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
+        OPENLEASH_PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
+        OPENLEASH_PROXY_MAX_BODY_BYTES: "512",
+        OPENLEASH_PROXY_MAX_GATED_RESPONSE_BYTES: "2048",
+        OPENLEASH_PROXY_MAX_CONCURRENT_GATES: "1",
+        OPENLEASH_PROXY_EVALUATION_TIMEOUT_SECONDS: "1",
+        OPENLEASH_PROXY_FAIL_OPEN: String(failOpen),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+}
+async function waitForHealth(port = proxyPort) {
   for (let i = 0; i < 120; i++) {
     try {
-      if ((await fetch(`http://127.0.0.1:${proxyPort}/healthz`)).ok) return;
+      if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return;
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   hasManagedCodexProxy,
   installAgentProtection,
+  openClawHandlerSource,
   openCodePluginSource,
   uninstallAllAgentProtections,
 } from "./agent-registry";
@@ -16,6 +17,38 @@ const context = {
   token: "test-token",
   clientVersion: "test-version",
 };
+
+test("generated hooks authenticate locally without putting tokens in URLs", () => {
+  const openCode = openCodePluginSource(context);
+  assert.match(openCode, /authorization.*Bearer test-token/i);
+  assert.match(openCode, /AbortError/);
+  assert.match(openCode, /TimeoutError/);
+  assert.match(openCode, /UND_ERR_SOCKET/);
+  assert.doesNotMatch(openCode, /[?&](?:user_)?token=/i);
+
+  const openClaw = openClawHandlerSource({
+    ...context,
+    availabilityFailOpen: true,
+  });
+  assert.match(openClaw, /authorization: Bearer test-token/i);
+  assert.match(openClaw, /\[7, 28\]/);
+  assert.match(openClaw, /event\.cancel = true/);
+  assert.doesNotMatch(openClaw, /[?&](?:user_)?token=/i);
+});
+
+test("CLI OpenClaw builds curl argv directly and keeps non-availability failures closed", () => {
+  const source = fs.readFileSync(
+    path.join(process.cwd(), "src", "cli", "install.ts"),
+    "utf8",
+  );
+  assert.match(source, /authorization: `Bearer \$\{config\.token\}`/);
+  assert.match(source, /localHookCurlArgs\("openclaw", "UserPromptSubmit"\)/);
+  assert.doesNotMatch(source, /command\.match\(/);
+  assert.match(source, /event\.cancel = true/);
+  assert.match(source, /AbortError/);
+  assert.match(source, /TimeoutError/);
+  assert.match(source, /UND_ERR_SOCKET/);
+});
 
 test("Codex monitoring re-enables hooks after an earlier uninstall", () => {
   const config = [
@@ -190,7 +223,10 @@ test("agent hook reinstall starts clean and uninstall restores the exact user co
     await installAgentProtection("claude-code", context);
     await installAgentProtection("claude-code", { ...context, token: "replacement-token" });
     const installed = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    assert.match(JSON.stringify(installed.hooks), /replacement-token/);
+    const installedHooks = JSON.stringify(installed.hooks);
+    assert.match(installedHooks, /replacement-token/);
+    assert.match(installedHooks, /--connect-timeout/);
+    assert.match(installedHooks, /hook_status/);
     assert.doesNotMatch(JSON.stringify(installed.__openleash), /\/v1\/hooks\/claude\//);
 
     await uninstallAllAgentProtections();

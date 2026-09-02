@@ -73,6 +73,7 @@ test("the desktop edge bypasses monitoring and transformation for excluded proje
     const hook = await fetch(new URL("/v1/hooks/codex/PreToolUse", server.apiUrl), {
       method: "POST",
       headers: {
+        authorization: `Bearer ${server.token}`,
         "content-type": "application/json",
         "x-openleash-api-function": "localHookEvaluate",
         "x-openleash-api-version": "2026-05-22.local-hook-evaluate.v1",

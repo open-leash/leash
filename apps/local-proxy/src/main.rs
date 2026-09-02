@@ -99,7 +99,7 @@ struct Config {
     #[arg(
         long,
         env = "OPENLEASH_PROXY_EVALUATION_TIMEOUT_SECONDS",
-        default_value_t = 120
+        default_value_t = 660
     )]
     evaluation_timeout_seconds: u64,
     #[arg(
@@ -127,6 +127,7 @@ struct App {
     gated_responses: Arc<AtomicU64>,
     gate_denials: Arc<AtomicU64>,
     gate_timeouts: Arc<AtomicU64>,
+    availability_bypasses: Arc<AtomicU64>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +179,7 @@ async fn main() {
         gated_responses: Arc::new(AtomicU64::new(0)),
         gate_denials: Arc::new(AtomicU64::new(0)),
         gate_timeouts: Arc::new(AtomicU64::new(0)),
+        availability_bypasses: Arc::new(AtomicU64::new(0)),
     };
     let app = build_router(Arc::new(state));
     let listener = tokio::net::TcpListener::bind(config.listen)
@@ -236,16 +238,50 @@ async fn health_upstream(
         )),
     }
 }
+
+fn availability_bypass_allowed(config: &Config, error: &reqwest::Error) -> bool {
+    if !config.fail_open {
+        return false;
+    }
+    if error.is_connect() {
+        return true;
+    }
+    error
+        .status()
+        .is_some_and(|status| is_availability_status(status.as_u16()))
+}
+
+fn is_availability_status(status: u16) -> bool {
+    // 429 is an explicit rate/cost boundary and must not become fail-open.
+    matches!(status, 408 | 425 | 500..=599)
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::is_availability_status;
+
+    #[test]
+    fn retries_only_true_availability_statuses() {
+        for status in [408, 425, 500, 502, 503, 504] {
+            assert!(is_availability_status(status), "status {status}");
+        }
+        for status in [400, 401, 403, 404, 409, 422, 429] {
+            assert!(!is_availability_status(status), "status {status}");
+        }
+    }
+}
+
 async fn metrics(State(app): State<Arc<App>>) -> String {
     let gate_capacity = app.config.max_concurrent_gates.max(1);
     let gate_inflight = gate_capacity.saturating_sub(app.gate_slots.available_permits());
     format!(
-        "# TYPE openleash_proxy_requests_total counter\nopenleash_proxy_requests_total {}\n# TYPE openleash_proxy_upstream_errors_total counter\nopenleash_proxy_upstream_errors_total {}\n# TYPE openleash_proxy_gated_responses_total counter\nopenleash_proxy_gated_responses_total {}\n# TYPE openleash_proxy_gate_denials_total counter\nopenleash_proxy_gate_denials_total {}\n# TYPE openleash_proxy_gate_timeouts_total counter\nopenleash_proxy_gate_timeouts_total {}\n# TYPE openleash_proxy_gate_inflight gauge\nopenleash_proxy_gate_inflight {}\n# TYPE openleash_proxy_gate_capacity gauge\nopenleash_proxy_gate_capacity {}\n",
+        "# TYPE openleash_proxy_requests_total counter\nopenleash_proxy_requests_total {}\n# TYPE openleash_proxy_upstream_errors_total counter\nopenleash_proxy_upstream_errors_total {}\n# TYPE openleash_proxy_gated_responses_total counter\nopenleash_proxy_gated_responses_total {}\n# TYPE openleash_proxy_gate_denials_total counter\nopenleash_proxy_gate_denials_total {}\n# TYPE openleash_proxy_gate_timeouts_total counter\nopenleash_proxy_gate_timeouts_total {}\n# TYPE openleash_proxy_availability_bypasses_total counter\nopenleash_proxy_availability_bypasses_total {}\n# TYPE openleash_proxy_gate_inflight gauge\nopenleash_proxy_gate_inflight {}\n# TYPE openleash_proxy_gate_capacity gauge\nopenleash_proxy_gate_capacity {}\n",
         app.requests.load(Ordering::Relaxed),
         app.upstream_errors.load(Ordering::Relaxed),
         app.gated_responses.load(Ordering::Relaxed),
         app.gate_denials.load(Ordering::Relaxed),
         app.gate_timeouts.load(Ordering::Relaxed),
+        app.availability_bypasses.load(Ordering::Relaxed),
         gate_inflight,
         gate_capacity,
     )
@@ -365,20 +401,24 @@ async fn forward(
                 container_plugin_runs = result.runs;
                 monitoring_paused = result.monitoring_paused;
             }
-            Ok(Err(error)) if !app.config.fail_open => {
+            Ok(Err(error)) if !availability_bypass_allowed(&app.config, &error) => {
                 return Err((
                     StatusCode::SERVICE_UNAVAILABLE,
                     format!("Leash Feature runtime unavailable: {error}"),
                 ));
             }
-            Ok(Err(_)) => {}
+            Ok(Err(_)) => {
+                app.availability_bypasses.fetch_add(1, Ordering::Relaxed);
+            }
             Err(_) if !app.config.fail_open => {
                 return Err((
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Leash Feature transformation timed out".to_owned(),
                 ));
             }
-            Err(_) => {}
+            Err(_) => {
+                app.availability_bypasses.fetch_add(1, Ordering::Relaxed);
+            }
         }
         if !monitoring_paused {
             let evaluation = tokio::time::timeout(
@@ -409,20 +449,24 @@ async fn forward(
                         }
                     }
                 }
-                Ok(Err(error)) if !app.config.fail_open => {
+                Ok(Err(error)) if !availability_bypass_allowed(&app.config, &error) => {
                     return Err((
                         StatusCode::SERVICE_UNAVAILABLE,
                         format!("Leash backend unavailable: {error}"),
                     ))
                 }
-                Ok(Err(_)) => {}
+                Ok(Err(_)) => {
+                    app.availability_bypasses.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(_) if !app.config.fail_open => {
                     return Err((
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Leash request evaluation timed out".to_owned(),
                     ))
                 }
-                Err(_) => {}
+                Err(_) => {
+                    app.availability_bypasses.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -499,13 +543,15 @@ async fn forward(
                         format!("Leash blocked this tool call: {}", decision.decision),
                     ));
                 }
-                Ok(Err(error)) if !app.config.fail_open => {
+                Ok(Err(error)) if !availability_bypass_allowed(&app.config, &error) => {
                     return Err((
                         StatusCode::SERVICE_UNAVAILABLE,
                         format!("Leash tool evaluation unavailable: {error}"),
                     ))
                 }
-                Ok(Err(_)) => {}
+                Ok(Err(_)) => {
+                    app.availability_bypasses.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(_) if !app.config.fail_open => {
                     app.gate_timeouts.fetch_add(1, Ordering::Relaxed);
                     return Err((
@@ -515,6 +561,7 @@ async fn forward(
                 }
                 Err(_) => {
                     app.gate_timeouts.fetch_add(1, Ordering::Relaxed);
+                    app.availability_bypasses.fetch_add(1, Ordering::Relaxed);
                 }
             }
         } else {

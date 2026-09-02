@@ -13,12 +13,40 @@ export function hashToken(token: string) {
 
 export async function getUserByToken(token: string) {
   const tokenHash = hashToken(token);
+  const desktop = await pool.query(
+    `update desktop_credentials dc
+     set last_seen_at = now()
+     from users u
+     where dc.user_id = u.id
+       and dc.organization_id = u.organization_id
+       and dc.token_hash = $1
+       and dc.revoked_at is null
+       and u.status = 'active'
+     returning u.id, u.email, u.display_name, u.organization_id,
+               dc.computer_id as desktop_computer_id`,
+    [tokenHash],
+  );
+  if (desktop.rows[0]) {
+    return desktop.rows[0] as {
+      id: string;
+      email: string;
+      display_name: string;
+      organization_id?: string | null;
+      desktop_computer_id?: string | null;
+    };
+  }
   const result = await pool.query(
     "select id, email, display_name, organization_id from users where token_hash = $1 and status = 'active' limit 1",
     [tokenHash]
   );
   if (result.rows[0]) {
-    return result.rows[0] as { id: string; email: string; display_name: string; organization_id?: string | null };
+    return result.rows[0] as {
+      id: string;
+      email: string;
+      display_name: string;
+      organization_id?: string | null;
+      desktop_computer_id?: string | null;
+    };
   }
 
   const session = await pool.query(
@@ -29,13 +57,20 @@ export async function getUserByToken(token: string) {
        and ds.organization_id = u.organization_id
        and u.status = 'active'
        and ds.token_hash = $1
+       and ds.provider <> 'desktop_enrollment'
        and ds.revoked_at is null
        and ds.expires_at > now()
      returning u.id, u.email, u.display_name, u.organization_id`,
     [hashToken(token)]
   );
   return session.rows[0] as
-    | { id: string; email: string; display_name: string; organization_id?: string | null }
+    | {
+        id: string;
+        email: string;
+        display_name: string;
+        organization_id?: string | null;
+        desktop_computer_id?: string | null;
+      }
     | undefined;
 }
 
@@ -63,23 +98,25 @@ export async function ensureDevToken() {
       )
     : undefined;
   const organizationId = organization?.rows[0]?.id ?? null;
+  const developerEmail = String(process.env.OPENLEASH_DEV_EMAIL ?? "dev-user@openleash.local").trim().toLowerCase();
+  const developerName = String(process.env.OPENLEASH_DEV_NAME ?? "Local developer").trim();
   const user = await pool.query<{ id: string }>(
     `insert into users (email, display_name, role, token_hash, organization_id)
-     values ('max.brin@openleash.local', 'Max Brin', 'owner', $1, $2)
+     values ($1, $2, 'owner', $3, $4)
      on conflict (email) do update set
        display_name = excluded.display_name,
        role = excluded.role,
        token_hash = excluded.token_hash,
        organization_id = coalesce(excluded.organization_id, users.organization_id)
      returning id`,
-    [hashToken(token), organizationId]
+    [developerEmail, developerName, hashToken(token), organizationId]
   );
-  const maxUserId = user.rows[0].id;
+  const developerUserId = user.rows[0].id;
   const legacy = await pool.query<{ id: string }>("select id from users where email = 'dev@openleash.local' limit 1");
   const legacyUserId = legacy.rows[0]?.id;
-  if (legacyUserId && legacyUserId !== maxUserId) {
-    await pool.query("update conversation_events set user_id = $1 where user_id = $2", [maxUserId, legacyUserId]);
-    await pool.query("update evaluations set user_id = $1 where user_id = $2", [maxUserId, legacyUserId]);
+  if (legacyUserId && legacyUserId !== developerUserId) {
+    await pool.query("update conversation_events set user_id = $1 where user_id = $2", [developerUserId, legacyUserId]);
+    await pool.query("update evaluations set user_id = $1 where user_id = $2", [developerUserId, legacyUserId]);
     await pool.query(
       `update computers c
        set user_id = $1
@@ -88,7 +125,7 @@ export async function ensureDevToken() {
            select 1 from computers existing
            where existing.user_id = $1 and existing.hostname = c.hostname
          )`,
-      [maxUserId, legacyUserId]
+      [developerUserId, legacyUserId]
     );
     await pool.query("update computers set user_id = null where user_id = $1", [legacyUserId]);
     await pool.query("delete from users where id = $1", [legacyUserId]);

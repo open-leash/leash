@@ -67,10 +67,12 @@ The proxy complements provider-specific API hooks. The proxy is authoritative fo
 
 Protected request and tool-call evaluations suspend only their asynchronous request task; they do not occupy a CPU thread while waiting. Unrelated traffic continues normally.
 
-The proxy fails closed by default. If Engine is unavailable or evaluation times
-out, protected traffic is denied. Operators can explicitly opt into fail-open
-behavior with `OPENLEASH_PROXY_FAIL_OPEN=true` when their risk model requires
-availability over enforcement.
+The standalone proxy fails closed by default. The managed Desktop Client starts
+it with classified availability fallback enabled: transport errors, timeouts,
+HTTP 408/425, and server-side 5xx responses may bypass evaluation, while a
+valid deny, authentication/entitlement 4xx, or malformed decision remains
+enforced. This keeps an unavailable Leash edge from stranding the provider
+without converting policy or account failures into an allow.
 
 Default limits include 16 MiB intercepted requests, eight simultaneous request evaluations, 8 MiB gated responses, and eight simultaneous response gates. These limits are configurable and apply backpressure instead of allowing unbounded memory growth.
 
@@ -105,7 +107,7 @@ For an OpenAI-compatible agent, use its OpenAI upstream instead. The desktop cli
 | `OPENLEASH_CLIENT_API` | Leash evaluation API URL. |
 | `OPENLEASH_TOKEN` | Authentication token for Engine. |
 | `OPENLEASH_CORPORATE_PROXY` | Optional existing organization proxy to chain through. |
-| `OPENLEASH_PROXY_FAIL_OPEN` | Explicitly allow protected traffic when evaluation fails. Defaults to `false`. |
+| `OPENLEASH_PROXY_FAIL_OPEN` | Allow only classified availability failures to bypass evaluation. Valid denies and non-retryable 4xx responses remain enforced. Defaults to `false`; managed Desktop enables it. |
 | `OPENLEASH_PROXY_MAX_BODY_BYTES` | Maximum intercepted request size. |
 | `OPENLEASH_PROXY_MAX_CONCURRENT_REQUEST_EVALUATIONS` | Concurrent protected request evaluations. |
 | `OPENLEASH_PROXY_MAX_GATED_RESPONSE_BYTES` | Maximum held response size per gate. |

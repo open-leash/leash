@@ -35,6 +35,7 @@ type InstallContext = {
   clientVersion: string;
   apiFunction?: string;
   apiVersion?: string;
+  availabilityFailOpen?: boolean;
 };
 
 type AgentDefinition = {
@@ -1090,6 +1091,7 @@ export function openCodePluginSource(context: InstallContext) {
   const stopUrl = hookEndpoint(context, "opencode", "Stop");
   const headers = {
     "content-type": "application/json",
+    authorization: `Bearer ${context.token}`,
     "x-openleash-api-function": context.apiFunction ?? "localHookEvaluate",
     "x-openleash-api-version":
       context.apiVersion ?? "2026-05-22.local-hook-evaluate.v1",
@@ -1097,16 +1099,34 @@ export function openCodePluginSource(context: InstallContext) {
   return `const headers = ${JSON.stringify(headers, null, 2)};
 
 async function evaluate(url, payload) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      ...payload,
-      cwd: payload.cwd || process.cwd(),
-      session_id: payload.session_id || payload.sessionID || payload.session?.id
-    }),
-    signal: AbortSignal.timeout(${HOOK_TIMEOUT_MS})
+  const body = JSON.stringify({
+    ...payload,
+    cwd: payload.cwd || process.cwd(),
+    session_id: payload.session_id || payload.sessionID || payload.session?.id
   });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(${HOOK_TIMEOUT_MS})
+    });
+  } catch (error) {
+    // Only managed Cloud accounts may bypass a genuine loopback transport
+    // outage. Serialization, policy, auth, and arbitrary application errors
+    // remain visible and fail closed.
+    const code = error?.cause?.code || error?.code;
+    const transportUnavailable = ["AbortError", "TimeoutError"].includes(error?.name)
+      || [
+        "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "ENETUNREACH",
+        "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT",
+        "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"
+      ].includes(code);
+    if (${context.availabilityFailOpen === true} && transportUnavailable)
+      return { decision: "allow", degraded: true };
+    throw error;
+  }
   if (!response.ok) {
     throw new Error(\`Leash backend unavailable (HTTP \${response.status}).\`);
   }
@@ -1219,7 +1239,6 @@ function hookEndpoint(
     `/v1/hooks/${agent}/${event}`,
     context.apiUrl.replace(/\/+$/, ""),
   );
-  endpoint.searchParams.set("user_token", context.token);
   endpoint.searchParams.set("hostname", os.hostname());
   endpoint.searchParams.set("platform", os.platform());
   endpoint.searchParams.set("os_release", os.release());
@@ -1483,19 +1502,32 @@ function hookCommand(
     `/v1/hooks/${agent}/${event}`,
     context.apiUrl.replace(/\/+$/, ""),
   );
-  endpoint.searchParams.set("user_token", context.token);
   endpoint.searchParams.set("hostname", os.hostname());
   endpoint.searchParams.set("platform", os.platform());
   endpoint.searchParams.set("os_release", os.release());
   endpoint.searchParams.set("client_version", context.clientVersion);
-  const args = [
+  const args = hookCurlArgs(context, endpoint);
+  const failOpen = context.availabilityFailOpen === true
+    ? '; if [ "$hook_status" -eq 7 ] || [ "$hook_status" -eq 28 ]; then exit 0; fi'
+    : "";
+  return `curl ${args.map(shellQuote).join(" ")}; hook_status=$?${failOpen}; exit "$hook_status"`;
+}
+
+function hookCurlArgs(context: InstallContext, endpoint: URL) {
+  return [
     "-sS",
     "--fail-with-body",
+    "--connect-timeout",
+    "1",
+    "--max-time",
+    String(HOOK_TIMEOUT_SECONDS + 10),
     "-X",
     "POST",
     endpoint.toString(),
     "-H",
     "content-type: application/json",
+    "-H",
+    `authorization: Bearer ${context.token}`,
     "-H",
     `x-openleash-api-function: ${context.apiFunction ?? "localHookEvaluate"}`,
     "-H",
@@ -1503,7 +1535,6 @@ function hookCommand(
     "--data-binary",
     "@-",
   ];
-  return `curl ${args.map(shellQuote).join(" ")}`;
 }
 
 function curlArgs(
@@ -1511,12 +1542,15 @@ function curlArgs(
   agent: LocalHookAgent,
   event: string,
 ) {
-  return (
-    hookCommand(context, agent, event)
-      .match(/"[^"]+"|'[^']+'|\S+/g)
-      ?.slice(1)
-      .map((part) => part.replace(/^["']|["']$/g, "")) ?? []
+  const endpoint = new URL(
+    `/v1/hooks/${agent}/${event}`,
+    context.apiUrl.replace(/\/+$/, ""),
   );
+  endpoint.searchParams.set("hostname", os.hostname());
+  endpoint.searchParams.set("platform", os.platform());
+  endpoint.searchParams.set("os_release", os.release());
+  endpoint.searchParams.set("client_version", context.clientVersion);
+  return hookCurlArgs(context, endpoint);
 }
 
 function shellQuote(value: string) {
@@ -1537,7 +1571,7 @@ Runs OpenLeash local approval checks before risky OpenClaw messages or commands 
 `;
 }
 
-function openClawHandlerSource(context: InstallContext) {
+export function openClawHandlerSource(context: InstallContext) {
   return `import { spawnSync } from "node:child_process";
 
 const handler = async (event) => {
@@ -1554,6 +1588,8 @@ const handler = async (event) => {
   });
   if (result.error || result.status !== 0) {
     event?.messages?.push?.("Leash could not evaluate this action.");
+    const availabilityFailure = [7, 28].includes(result.status) || result.error?.code === "ETIMEDOUT";
+    if (!(${context.availabilityFailOpen === true} && availabilityFailure)) event.cancel = true;
     return;
   }
   try {
@@ -1564,6 +1600,7 @@ const handler = async (event) => {
     }
   } catch {
     if (result.stdout) event?.messages?.push?.(result.stdout);
+    event.cancel = true;
   }
 };
 

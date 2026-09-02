@@ -64,9 +64,22 @@ test("Business membership never turns Desktop into an organization admin console
 });
 
 test("Business sign-in uses a restricted grant while preserving normal endpoint enrollment", () => {
-  assert.match(desktopMain, /callback\.searchParams\.get\("enrollment_token"\)/);
-  assert.match(desktopMain, /token: enrollmentToken \|\| dashboardToken!/);
+  assert.match(desktopMain, /callback\.searchParams\.get\("code"\)/);
+  assert.match(desktopMain, /codeVerifier: pending\.codeVerifier/);
+  assert.match(desktopMain, /token: handoffBody\.desktopEnrollmentToken/);
   assert.match(desktopMain, /desktopAuthSession\?\.token && remoteToken === desktopAuthSession\.token/);
   assert.match(desktopMain, /body\.desktopEnrollmentToken/);
   assert.match(desktopMain, /desktopEnrollment: true/);
+  assert.doesNotMatch(desktopMain, /callback\.searchParams\.get\("enrollment_token"\)/);
+});
+
+test("every legacy Desktop OAuth callback is PKCE-bound before it reaches the custom URL scheme", () => {
+  const authStart = desktopMain.slice(
+    desktopMain.indexOf("async function startMobileAuth"),
+    desktopMain.indexOf("async function enrollDesktopEndpoint"),
+  );
+  assert.match(authStart, /const codeVerifier = crypto\.randomBytes\(32\)/);
+  assert.match(authStart, /codeChallengeMethod: "S256"/);
+  assert.match(authStart, /codeVerifier,/);
+  assert.match(desktopMain, /codeVerifier: pending\.codeVerifier/);
 });

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:app_links/app_links.dart';
 import 'package:flutter/foundation.dart';
@@ -9,6 +10,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'openleash_public_config.dart';
@@ -174,6 +176,8 @@ class _LeashHomeState extends State<LeashHome> {
   String? _pendingProvider;
   String? _pendingOrganizationId;
   String? _pendingExchangeRedirectUri;
+  String? _pendingAuthState;
+  String? _pendingCodeVerifier;
   Map<String, dynamic>? _bootstrap;
   Map<String, dynamic>? _state;
   Map<String, dynamic>? _billing;
@@ -359,6 +363,15 @@ class _LeashHomeState extends State<LeashHome> {
           'google';
       _pendingOrganizationId = null;
       _audience = 'individual';
+      final secureRandom = Random.secure();
+      final verifierBytes = List<int>.generate(
+        32,
+        (_) => secureRandom.nextInt(256),
+      );
+      _pendingCodeVerifier = base64UrlEncode(verifierBytes).replaceAll('=', '');
+      final codeChallenge = base64UrlEncode(
+        crypto.sha256.convert(utf8.encode(_pendingCodeVerifier!)).bytes,
+      ).replaceAll('=', '');
       final response = await _request(
         'POST',
         '/v1/mobile/auth/start',
@@ -368,6 +381,8 @@ class _LeashHomeState extends State<LeashHome> {
           'audience': _audience,
           'providerType': _pendingProvider,
           'organizationId': _pendingOrganizationId,
+          'codeChallenge': codeChallenge,
+          'codeChallengeMethod': 'S256',
         },
       );
       if (response.statusCode >= 400) {
@@ -376,6 +391,10 @@ class _LeashHomeState extends State<LeashHome> {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       _pendingExchangeRedirectUri =
           data['exchangeRedirectUri'] as String? ?? _redirectUri;
+      _pendingAuthState = data['state'] as String?;
+      if (_pendingAuthState == null || _pendingAuthState!.length < 32) {
+        throw Exception('The API did not return a secure sign-in state.');
+      }
       final url = Uri.parse(data['authorizationUrl'] as String);
       if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
         throw Exception('Could not open identity provider.');
@@ -407,16 +426,38 @@ class _LeashHomeState extends State<LeashHome> {
       _pendingExchangeRedirectUri = exchangeRedirectUri;
     }
     final code = uri.queryParameters['code'];
+    final state = uri.queryParameters['state'];
+    if (state == null || state != _pendingAuthState) {
+      setStateSafe(
+        () =>
+            _error = 'This sign-in request expired or does not match this app.',
+      );
+      return;
+    }
     if (code == null || code.isEmpty) {
       setStateSafe(
         () => _error = 'Sign-in was cancelled or returned without a code.',
       );
       return;
     }
-    await _exchangeCode(code);
+    final pendingState = _pendingAuthState;
+    final pendingCodeVerifier = _pendingCodeVerifier;
+    _pendingAuthState = null;
+    _pendingCodeVerifier = null;
+    if (pendingCodeVerifier == null || pendingCodeVerifier.length < 43) {
+      setStateSafe(
+        () => _error = 'This sign-in request is no longer bound to this app.',
+      );
+      return;
+    }
+    await _exchangeCode(code, pendingState!, pendingCodeVerifier);
   }
 
-  Future<void> _exchangeCode(String code) async {
+  Future<void> _exchangeCode(
+    String code,
+    String state,
+    String codeVerifier,
+  ) async {
     setStateSafe(() {
       _busy = true;
       _error = null;
@@ -430,6 +471,8 @@ class _LeashHomeState extends State<LeashHome> {
           'redirectUri': _pendingExchangeRedirectUri ?? _redirectUri,
           'audience': _audience,
           'authorizationCode': code,
+          'state': state,
+          'codeVerifier': codeVerifier,
           'providerType': _pendingProvider ?? 'google',
           'organizationId': _pendingOrganizationId,
           'provisionUser': false,

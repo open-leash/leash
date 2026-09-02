@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import cors from "cors";
 import "dotenv/config";
 import express, { type Express } from "express";
+import type { PoolClient } from "pg";
 import {
   buildOpenLeashClientViewModel,
   OPENLEASH_API_CONTRACTS,
@@ -191,6 +192,18 @@ class HttpError extends Error {
 
 function statusCodeForError(error: unknown) {
   if (!error || typeof error !== "object") return 500;
+  if ("code" in error && String(error.code) === "P0001" && "message" in error) {
+    const message = String(error.message);
+    if (
+      /Leash workspace.*capacity/i.test(message)
+      || /Cloud trial protects one computer per person/i.test(message)
+      || /Personal Cloud protects up to two computers/i.test(message)
+    ) {
+      return 403;
+    }
+    if (/stable Leash installation identity/i.test(message)) return 400;
+    if (/Leash Cloud account is not active/i.test(message)) return 402;
+  }
   const candidate = "statusCode" in error
     ? Number(error.statusCode)
     : "status" in error
@@ -570,13 +583,21 @@ app.post("/api/admin/releases", async (req, res) => {
 });
 
 app.post("/v1/enroll", async (req, res, next) => {
+  const client = await pool.connect();
   try {
     const deploymentToken = String(
       req.body.deploymentToken ?? req.body.token ?? "",
     ).trim();
     if (!deploymentToken)
       return res.status(401).json({ error: "missing deployment token" });
-    const token = await pool.query<{
+    const installIdentity = String(req.body?.installIdentity ?? "").trim();
+    if (installIdentity.length < 16 || installIdentity.length > 1024) {
+      return res.status(400).json({
+        error: "A stable desktop installation identity is required. Update Leash and try again.",
+      });
+    }
+    await client.query("begin");
+    const token = await client.query<{
       id: string;
       organization_id: string;
       label: string;
@@ -594,10 +615,15 @@ app.post("/v1/enroll", async (req, res, next) => {
       [hashToken(deploymentToken)],
     );
     const deployment = token.rows[0];
-    if (!deployment)
+    if (!deployment) {
+      await client.query("rollback");
       return res
         .status(401)
         .json({ error: "invalid or expired deployment token" });
+    }
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [
+      `openleash-protected-user-capacity:${deployment.organization_id}`,
+    ]);
 
     const hostname =
       String(req.body.hostname ?? os.hostname()).trim() || os.hostname();
@@ -612,37 +638,89 @@ app.post("/v1/enroll", async (req, res, next) => {
     ).toLowerCase();
     const agentToken = `ol_${crypto.randomBytes(24).toString("base64url")}`;
 
-    const user = await pool.query<{
+    const existingIdentity = await client.query<{
       id: string;
+      organization_id: string;
       email: string;
       display_name: string;
+      status: string;
+      same_installation: boolean;
     }>(
-      `insert into users (organization_id, email, display_name, role, token_hash)
-       values ($1, $2, $3, 'engineer', $4)
-       on conflict (email) do update set
-         display_name = excluded.display_name,
-         token_hash = excluded.token_hash
-       where users.organization_id = excluded.organization_id
-       returning id, email, display_name`,
-      [deployment.organization_id, email, displayName, hashToken(agentToken)],
+      `select u.id, u.organization_id, u.email, u.display_name, u.status,
+              exists (
+                select 1 from computers c
+                where c.user_id = u.id and c.install_identity = $2
+              ) as same_installation
+       from users u
+       where lower(u.email) = lower($1)
+       limit 1`,
+      [email, installIdentity],
     );
-    if (!user.rows[0]) {
+    const existingUser = existingIdentity.rows[0];
+    if (existingUser && existingUser.organization_id !== deployment.organization_id) {
+      await client.query("rollback");
       return res.status(409).json({
         error: "This email is already enrolled in a different OpenLeash organization.",
       });
     }
-    const computer = await pool.query<{ id: string }>(
-      `insert into computers (user_id, hostname, platform, os_release, enrollment_token_id, enrolled_at, last_seen_at)
-       values ($1, $2, $3, $4, $5, now(), now())
-       on conflict (user_id, hostname) do update set
+    if (existingUser && existingUser.status !== "active") {
+      await client.query("rollback");
+      return res.status(403).json({
+        error: "This employee is not active. Ask a workspace admin before enrolling this computer.",
+        code: "enrollment_identity_inactive",
+      });
+    }
+    if (existingUser && !existingUser.same_installation) {
+      await client.query("rollback");
+      return res.status(409).json({
+        error: "This employee already belongs to the workspace. Sign in as that employee to protect a new computer.",
+        code: "enrollment_identity_requires_sign_in",
+      });
+    }
+    // A reusable organization deployment token cannot authenticate a person.
+    // New installations use the employee's one-time Desktop sign-in grant;
+    // this endpoint may only recover the exact installation already associated
+    // with an active user.
+    if (!existingUser) {
+      await client.query("rollback");
+      return res.status(409).json({
+        error: "Sign in as the employee before enrolling this computer. A shared deployment token cannot create a Leash identity.",
+        code: "enrollment_identity_requires_sign_in",
+      });
+    }
+    const user = { rows: [{
+      id: existingUser.id,
+      email: existingUser.email,
+      display_name: existingUser.display_name,
+    }] };
+    const computer = await client.query<{ id: string }>(
+      `insert into computers (
+         user_id, hostname, platform, os_release, install_identity,
+         enrollment_token_id, enrolled_at, last_seen_at
+       ) values ($1, $2, $3, $4, $5, $6, now(), now())
+       on conflict (user_id, install_identity) where install_identity is not null do update set
+         hostname = excluded.hostname,
          platform = excluded.platform,
          os_release = excluded.os_release,
          enrollment_token_id = excluded.enrollment_token_id,
          enrolled_at = coalesce(computers.enrolled_at, now()),
          last_seen_at = now()
        returning id`,
-      [user.rows[0].id, hostname, platform, osRelease, deployment.id],
+      [user.rows[0].id, hostname, platform, osRelease, installIdentity, deployment.id],
     );
+    await client.query(
+      `insert into desktop_credentials (
+         organization_id, user_id, computer_id, token_hash, last_seen_at
+       ) values ($1, $2, $3, $4, now())
+       on conflict (computer_id) do update set
+         organization_id = excluded.organization_id,
+         user_id = excluded.user_id,
+         token_hash = excluded.token_hash,
+         revoked_at = null,
+         last_seen_at = now()`,
+      [deployment.organization_id, user.rows[0].id, computer.rows[0].id, hashToken(agentToken)],
+    );
+    await client.query("commit");
 
     res.status(201).json({
       mode: deployment.mode,
@@ -654,7 +732,10 @@ app.post("/v1/enroll", async (req, res, next) => {
       rulesManagedBy: "admin-dashboard",
     });
   } catch (error) {
+    await client.query("rollback").catch(() => undefined);
     next(error);
+  } finally {
+    client.release();
   }
 });
 
@@ -2767,13 +2848,12 @@ app.post("/auth/sso/authorize", async (req, res, next) => {
         .status(400)
         .json({ error: "organizationId and providerType are required" });
     const result = await pool.query(
-      `select provider, config from idp_connections where organization_id = $1 and enabled = true limit 1`,
+      `select provider, config from idp_connections where organization_id = $1 and enabled = true`,
       [organizationId],
     );
-    const row =
-      result.rows.find(
-        (item) => ssoProviderType(item.provider) === providerType,
-      ) ?? result.rows[0];
+    const row = result.rows.find(
+      (item) => ssoProviderType(item.provider) === providerType,
+    );
     if (!row)
       return res
         .status(404)
@@ -2781,7 +2861,13 @@ app.post("/auth/sso/authorize", async (req, res, next) => {
     const redirectUri =
       process.env.OPENLEASH_SSO_REDIRECT_URI ??
       `${process.env.OPENLEASH_TENANT_URL ?? "http://localhost:9300"}/auth/sso/callback`;
-    const state = crypto.randomBytes(18).toString("base64url");
+    const state = await createOAuthLoginState({
+      providerType,
+      audience: "organization",
+      organizationId,
+      finalRedirectUri: redirectUri,
+      exchangeRedirectUri: redirectUri,
+    });
     const authorizationUrl = await buildAuthorizationUrl(
       providerType,
       row.config ?? {},
@@ -2792,7 +2878,7 @@ app.post("/auth/sso/authorize", async (req, res, next) => {
       return res
         .status(400)
         .json({ error: `Unsupported provider type: ${providerType}` });
-    res.json({ authorizationUrl, state, providerType, organizationId });
+    res.json({ authorizationUrl, state, providerType, organizationId, redirectUri });
   } catch (error) {
     next(error);
   }
@@ -2806,16 +2892,33 @@ app.post("/auth/sso/callback", async (req, res, next) => {
       req.body.authorizationCode ?? req.body.code ?? "",
     ).trim();
     const redirectUri = String(req.body.redirectUri ?? "").trim();
+    const state = String(req.body.state ?? "").trim();
     if (
       !organizationId ||
       !providerType ||
       !authorizationCode ||
-      !redirectUri
+      !redirectUri ||
+      !state
     ) {
       return res.status(400).json({
         success: false,
         message:
-          "organizationId, providerType, authorizationCode, and redirectUri are required",
+          "organizationId, providerType, authorizationCode, redirectUri, and state are required",
+      });
+    }
+
+    if (
+      !(await consumeOAuthLoginState({
+        state,
+        providerType,
+        audience: "organization",
+        organizationId,
+        exchangeRedirectUri: redirectUri,
+      }))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "This sign-in request expired, was already used, or does not match this organization.",
       });
     }
 
@@ -2823,10 +2926,9 @@ app.post("/auth/sso/callback", async (req, res, next) => {
       `select provider, config from idp_connections where organization_id = $1 and enabled = true`,
       [organizationId],
     );
-    const row =
-      providerResult.rows.find(
-        (item) => ssoProviderType(item.provider) === providerType,
-      ) ?? providerResult.rows[0];
+    const row = providerResult.rows.find(
+      (item) => ssoProviderType(item.provider) === providerType,
+    );
     if (!row)
       return res.status(404).json({
         success: false,
@@ -2883,14 +2985,21 @@ app.get("/auth/google/start", async (req, res) => {
   }
   const exchangeRedirectUri = webGoogleRedirectUri(req);
   if (process.env.OPENLEASH_MOBILE_DEV_AUTH === "1") {
+    const state = await createOAuthLoginState({
+      providerType: "google",
+      audience: "organization",
+      finalRedirectUri,
+      exchangeRedirectUri,
+    });
     const redirect = new URL(finalRedirectUri);
     redirect.searchParams.set("code", "dev-auth");
-    redirect.searchParams.set("state", "development");
+    redirect.searchParams.set("state", state);
     redirect.searchParams.set("exchangeRedirectUri", exchangeRedirectUri);
     return res.redirect(302, redirect.toString());
   }
-  const state = encodeMobileAuthState({
-    nonce: crypto.randomBytes(18).toString("base64url"),
+  const state = await createOAuthLoginState({
+    providerType: "google",
+    audience: "organization",
     finalRedirectUri,
     exchangeRedirectUri,
   });
@@ -2920,14 +3029,21 @@ app.get("/auth/microsoft/start", async (req, res) => {
   }
   const exchangeRedirectUri = webMicrosoftRedirectUri(req);
   if (process.env.OPENLEASH_MOBILE_DEV_AUTH === "1") {
+    const state = await createOAuthLoginState({
+      providerType: "azure_ad",
+      audience: "organization",
+      finalRedirectUri,
+      exchangeRedirectUri,
+    });
     const redirect = new URL(finalRedirectUri);
     redirect.searchParams.set("code", "dev-auth");
-    redirect.searchParams.set("state", "development");
+    redirect.searchParams.set("state", state);
     redirect.searchParams.set("exchangeRedirectUri", exchangeRedirectUri);
     return res.redirect(302, redirect.toString());
   }
-  const state = encodeMobileAuthState({
-    nonce: crypto.randomBytes(18).toString("base64url"),
+  const state = await createOAuthLoginState({
+    providerType: "azure_ad",
+    audience: "organization",
     finalRedirectUri,
     exchangeRedirectUri,
   });
@@ -2949,9 +3065,10 @@ app.get("/auth/microsoft/start", async (req, res) => {
   res.redirect(302, authorizationUrl);
 });
 
-app.get("/auth/google/callback", (req, res) => {
+app.get("/auth/google/callback", async (req, res, next) => {
+ try {
   const state = String(req.query.state ?? "");
-  const callbackState = decodeMobileAuthState(state);
+  const callbackState = await activeOAuthLoginState(state, "google");
   const finalRedirectUri = callbackState?.finalRedirectUri;
   if (!finalRedirectUri || !isAllowedAuthRedirectUri(finalRedirectUri)) {
     return res
@@ -2971,11 +3088,15 @@ app.get("/auth/google/callback", (req, res) => {
   }
   redirect.searchParams.set("exchangeRedirectUri", exchangeRedirectUri);
   res.redirect(302, redirect.toString());
+ } catch (error) {
+   next(error);
+ }
 });
 
-app.get("/auth/microsoft/callback", (req, res) => {
+app.get("/auth/microsoft/callback", async (req, res, next) => {
+ try {
   const state = String(req.query.state ?? "");
-  const callbackState = decodeMobileAuthState(state);
+  const callbackState = await activeOAuthLoginState(state, "azure_ad");
   const finalRedirectUri = callbackState?.finalRedirectUri;
   if (!finalRedirectUri || !isAllowedAuthRedirectUri(finalRedirectUri)) {
     return res
@@ -2995,6 +3116,9 @@ app.get("/auth/microsoft/callback", (req, res) => {
   }
   redirect.searchParams.set("exchangeRedirectUri", exchangeRedirectUri);
   res.redirect(302, redirect.toString());
+ } catch (error) {
+   next(error);
+ }
 });
 
 app.get("/auth/session", async (req, res, next) => {
@@ -3206,6 +3330,28 @@ app.post("/v1/mobile/auth/start", async (req, res, next) => {
     const redirectUri = String(body.redirectUri ?? "").trim();
     if (!redirectUri)
       return res.status(400).json({ error: "redirectUri is required" });
+    if (!isAllowedAuthRedirectUri(redirectUri)) {
+      return res.status(400).json({ error: "redirectUri is not allowed" });
+    }
+    const codeChallenge = String(body.codeChallenge ?? "").trim();
+    const codeChallengeMethod = String(body.codeChallengeMethod ?? "").trim();
+    const usesCustomScheme = new URL(redirectUri).protocol === "openleash:";
+    if (
+      (usesCustomScheme || codeChallenge) &&
+      (codeChallengeMethod !== "S256" || !validPkceValue(codeChallenge))
+    ) {
+      return res.status(400).json({
+        error: "A valid S256 PKCE challenge is required for app sign-in.",
+      });
+    }
+    if (
+      normalizePublicCloudAuthProvider(String(body.providerType ?? "google")) === "github" &&
+      audience === "organization"
+    ) {
+      return res.status(400).json({
+        error: "GitHub sign-in is available for individual accounts only.",
+      });
+    }
 
     const organization = body.organizationId
       ? await getOrganizationById(body.organizationId)
@@ -3223,7 +3369,15 @@ app.post("/v1/mobile/auth/start", async (req, res, next) => {
         return res.status(404).json({
           error: "Identity provider is not configured for this organization",
         });
-      const state = crypto.randomBytes(18).toString("base64url");
+      const state = await createOAuthLoginState({
+        providerType: provider.providerType,
+        audience: "organization",
+        organizationId: organization.id,
+        organizationSlug: organization.slug,
+        finalRedirectUri: redirectUri,
+        exchangeRedirectUri: redirectUri,
+        codeChallenge: codeChallenge || undefined,
+      });
       const authorizationUrl = await buildAuthorizationUrl(
         provider.providerType,
         provider.config,
@@ -3239,6 +3393,7 @@ app.post("/v1/mobile/auth/start", async (req, res, next) => {
         state,
         providerType: provider.providerType,
         organizationId: organization.id,
+        exchangeRedirectUri: redirectUri,
       });
     }
 
@@ -3252,12 +3407,21 @@ app.post("/v1/mobile/auth/start", async (req, res, next) => {
       });
     }
     if (process.env.OPENLEASH_MOBILE_DEV_AUTH === "1") {
+      const state = await createOAuthLoginState({
+        providerType,
+        audience,
+        organizationSlug: body.organizationSlug,
+        finalRedirectUri: redirectUri,
+        exchangeRedirectUri: redirectUri,
+        codeChallenge: codeChallenge || undefined,
+      });
       const authorizationUrl = new URL(
         "/v1/mobile/dev-auth/callback",
         publicApiUrl(req),
       );
       authorizationUrl.searchParams.set("redirectUri", redirectUri);
       authorizationUrl.searchParams.set("audience", audience);
+      authorizationUrl.searchParams.set("state", state);
       if (body.organizationId)
         authorizationUrl.searchParams.set(
           "organizationId",
@@ -3270,7 +3434,7 @@ app.post("/v1/mobile/auth/start", async (req, res, next) => {
         );
       return res.json({
         authorizationUrl: authorizationUrl.toString(),
-        state: "development",
+        state,
         providerType,
         exchangeRedirectUri: redirectUri,
         organizationId: body.organizationId,
@@ -3283,10 +3447,13 @@ app.post("/v1/mobile/auth/start", async (req, res, next) => {
       providerType,
       redirectUri,
     );
-    const state = encodeMobileAuthState({
-      nonce: crypto.randomBytes(18).toString("base64url"),
+    const state = await createOAuthLoginState({
+      providerType,
+      audience,
+      organizationSlug: body.organizationSlug,
       finalRedirectUri: redirectUri,
       exchangeRedirectUri,
+      codeChallenge: codeChallenge || undefined,
     });
     const authorizationUrl =
       providerType === "azure_ad"
@@ -3357,9 +3524,10 @@ app.get("/v1/mobile/dev-auth/callback", (req, res) => {
   res.redirect(302, redirect.toString());
 });
 
-app.get("/v1/auth/google/callback", (req, res) => {
+app.get("/v1/auth/google/callback", async (req, res, next) => {
+ try {
   const state = String(req.query.state ?? "");
-  const callbackState = decodeMobileAuthState(state);
+  const callbackState = await activeOAuthLoginState(state, "google");
   const finalRedirectUri = callbackState?.finalRedirectUri;
   if (!finalRedirectUri || !isAllowedAuthRedirectUri(finalRedirectUri)) {
     return res
@@ -3381,11 +3549,15 @@ app.get("/v1/auth/google/callback", (req, res) => {
       `${publicApiUrl(req)}/v1/auth/google/callback`,
   );
   res.redirect(302, redirect.toString());
+ } catch (error) {
+   next(error);
+ }
 });
 
-app.get("/v1/auth/microsoft/callback", (req, res) => {
+app.get("/v1/auth/microsoft/callback", async (req, res, next) => {
+ try {
   const state = String(req.query.state ?? "");
-  const callbackState = decodeMobileAuthState(state);
+  const callbackState = await activeOAuthLoginState(state, "azure_ad");
   const finalRedirectUri = callbackState?.finalRedirectUri;
   if (!finalRedirectUri || !isAllowedAuthRedirectUri(finalRedirectUri)) {
     return res
@@ -3407,11 +3579,15 @@ app.get("/v1/auth/microsoft/callback", (req, res) => {
       `${publicApiUrl(req)}/v1/auth/microsoft/callback`,
   );
   res.redirect(302, redirect.toString());
+ } catch (error) {
+   next(error);
+ }
 });
 
-app.get("/v1/auth/github/callback", (req, res) => {
+app.get("/v1/auth/github/callback", async (req, res, next) => {
+ try {
   const state = String(req.query.state ?? "");
-  const callbackState = decodeMobileAuthState(state);
+  const callbackState = await activeOAuthLoginState(state, "github");
   const finalRedirectUri = callbackState?.finalRedirectUri;
   if (!finalRedirectUri || !isAllowedAuthRedirectUri(finalRedirectUri)) {
     return res
@@ -3433,6 +3609,9 @@ app.get("/v1/auth/github/callback", (req, res) => {
       `${publicApiUrl(req)}/v1/auth/github/callback`,
   );
   res.redirect(302, redirect.toString());
+ } catch (error) {
+   next(error);
+ }
 });
 
 app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
@@ -3447,11 +3626,22 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
     const requestedProviderType = String(body.providerType ?? "").trim();
     const redirectUri = String(body.redirectUri ?? "").trim();
     const authorizationCode = String(body.authorizationCode ?? "").trim();
+    const state = String(body.state ?? "").trim();
+    const codeVerifier = String(body.codeVerifier ?? "").trim();
     const idToken = String(body.idToken ?? "").trim();
     if (!redirectUri)
       return res
         .status(400)
         .json({ success: false, message: "redirectUri is required" });
+    if (
+      normalizePublicCloudAuthProvider(requestedProviderType || "google") === "github" &&
+      audience === "organization"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "GitHub sign-in is available for individual accounts only.",
+      });
+    }
 
     const requestedOrganization = body.organizationId
       ? await getOrganizationById(body.organizationId)
@@ -3479,14 +3669,31 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
       !idToken &&
       process.env.OPENLEASH_MOBILE_DEV_AUTH === "1"
     ) {
+      if (
+        !(await consumeOAuthLoginState({
+          state,
+          providerType: developmentProviderType,
+          audience,
+          organizationId: requestedOrganization?.id,
+          organizationSlug:
+            requestedOrganization?.slug ?? body.organizationSlug,
+          exchangeRedirectUri: redirectUri,
+          codeVerifier: codeVerifier || undefined,
+        }))
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "This sign-in request expired, was already used, or does not match this device.",
+        });
+      }
       const developmentEmail =
         process.env.OPENLEASH_MOBILE_DEV_EMAIL ??
         (requestedOrganization
-          ? "ava.chen@example.com"
-          : "mobile.user@openleash.com");
+          ? "developer@example.test"
+          : "dev-user@openleash.local");
       const developmentName =
         process.env.OPENLEASH_MOBILE_DEV_NAME ??
-        (requestedOrganization ? "Ava Chen" : "Mobile User");
+        displayNameFromEmail(developmentEmail);
       const profile = {
         subject: `mobile-dev:${developmentEmail.toLowerCase()}`,
         email: developmentEmail,
@@ -3549,6 +3756,25 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
     const providerType =
       organizationSsoProvider?.providerType ??
       normalizePublicCloudAuthProvider(requestedProviderType || "google");
+    if (authorizationCode) {
+      if (
+        !(await consumeOAuthLoginState({
+          state,
+          providerType,
+          audience,
+          organizationId: requestedOrganization?.id,
+          organizationSlug:
+            requestedOrganization?.slug ?? body.organizationSlug,
+          exchangeRedirectUri: redirectUri,
+          codeVerifier: codeVerifier || undefined,
+        }))
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "This sign-in request expired, was already used, or does not match this device.",
+        });
+      }
+    }
     const organizationForProvider =
       requestedOrganization ??
       (providerType === "google" ||
@@ -3657,6 +3883,165 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
   }
 });
 
+app.post("/v1/mobile/auth/handoff", async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const session = await getDashboardSession(
+      req.header("authorization") ?? "",
+    );
+    if (!session)
+      return res.status(401).json({ error: "valid dashboard session required" });
+    const state = String(req.body?.state ?? "").trim();
+    const codeChallenge = String(req.body?.codeChallenge ?? "").trim();
+    if (!validOAuthState(state) || !validPkceValue(codeChallenge)) {
+      return res.status(400).json({
+        error: "A valid Desktop state and PKCE challenge are required.",
+      });
+    }
+    const code = `olh_${crypto.randomBytes(32).toString("base64url")}`;
+    await client.query("begin");
+    try {
+      await client.query(
+        `update desktop_auth_handoffs
+         set consumed_at = coalesce(consumed_at, now())
+         where user_id = $1 and consumed_at is null`,
+        [session.user.id],
+      );
+      await client.query(
+        `insert into desktop_auth_handoffs (
+           organization_id, user_id, code_hash, state_hash, code_challenge,
+           expires_at
+         ) values ($1, $2, $3, $4, $5, now() + interval '5 minutes')`,
+        [
+          session.organization.id,
+          session.user.id,
+          hashToken(code),
+          hashToken(state),
+          codeChallenge,
+        ],
+      );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    }
+    res.status(201).json({ code, expiresIn: 300 });
+  } catch (error) {
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/v1/mobile/auth/handoff/exchange", async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const code = String(req.body?.code ?? "").trim();
+    const state = String(req.body?.state ?? "").trim();
+    const codeVerifier = String(req.body?.codeVerifier ?? "").trim();
+    if (
+      !/^olh_[A-Za-z0-9_-]{43}$/.test(code) ||
+      !validOAuthState(state) ||
+      !validPkceValue(codeVerifier)
+    ) {
+      return res.status(400).json({
+        error: "The Desktop handoff is malformed. Start sign-in again from Leash.",
+      });
+    }
+    await client.query("begin");
+    const handoffResult = await client.query<{
+      id: string;
+      organization_id: string;
+      user_id: string;
+      state_hash: string;
+      code_challenge: string;
+      email: string;
+      display_name: string;
+      role: string;
+      user_metadata: Record<string, unknown> | null;
+      organization_name: string;
+      organization_slug: string;
+      region: string | null;
+      infrastructure_config: Record<string, unknown> | null;
+    }>(
+      `select h.id, h.organization_id, h.user_id, h.state_hash,
+              h.code_challenge, u.email, u.display_name, u.role,
+              u.metadata as user_metadata, o.name as organization_name,
+              o.slug as organization_slug, o.region,
+              o.infrastructure_config
+       from desktop_auth_handoffs h
+       join users u on u.id = h.user_id and u.organization_id = h.organization_id
+       join organizations o on o.id = h.organization_id
+       where h.code_hash = $1
+         and h.consumed_at is null
+         and h.expires_at > now()
+         and u.status = 'active'
+       for update of h`,
+      [hashToken(code)],
+    );
+    const handoff = handoffResult.rows[0];
+    const calculatedChallenge = crypto
+      .createHash("sha256")
+      .update(codeVerifier)
+      .digest("base64url");
+    if (
+      !handoff ||
+      !secureHashEquals(hashToken(state), handoff.state_hash) ||
+      !secureTokenEquals(calculatedChallenge, handoff.code_challenge)
+    ) {
+      await client.query("rollback");
+      return res.status(401).json({
+        error: "This Desktop handoff expired, was already used, or does not match this Leash app.",
+      });
+    }
+    await client.query(
+      `update desktop_auth_handoffs set consumed_at = now() where id = $1`,
+      [handoff.id],
+    );
+    const enrollmentToken = `ole_${crypto.randomBytes(24).toString("base64url")}`;
+    await client.query(
+      `insert into dashboard_sessions (
+         organization_id, user_id, token_hash, provider, expires_at
+       ) values ($1, $2, $3, 'desktop_enrollment', now() + interval '10 minutes')`,
+      [handoff.organization_id, handoff.user_id, hashToken(enrollmentToken)],
+    );
+    await client.query("commit");
+    const userMetadata = handoff.user_metadata ?? {};
+    const organizationConfig = handoff.infrastructure_config ?? {};
+    res.json({
+      success: true,
+      desktopEnrollmentToken: enrollmentToken,
+      user: {
+        id: handoff.user_id,
+        email: handoff.email,
+        display_name: handoff.display_name,
+        role: handoff.role,
+      },
+      organization: {
+        id: handoff.organization_id,
+        name: handoff.organization_name,
+        slug: handoff.organization_slug,
+        region: handoff.region,
+      },
+      account: {
+        audience:
+          userMetadata.accountAudience === "individual"
+            ? "individual"
+            : "organization",
+        packageId: normalizeAccountPackage(
+          userMetadata.accountPackage ?? organizationConfig.accountPackage,
+        ),
+      },
+      evaluationProvider: await tenantModelKeySummary(handoff.organization_id),
+    });
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
 app.post("/v1/mobile/model-key", async (req, res, next) => {
   try {
     const session = await getClientOrDashboardSession(
@@ -3740,6 +4125,7 @@ app.post("/v1/mobile/devices", async (req, res, next) => {
 });
 
 app.post("/v1/desktop/enroll", async (req, res, next) => {
+  const client = await pool.connect();
   try {
     const authorization = req.header("authorization") ?? "";
     const enrollmentSession = await getDashboardSession(
@@ -3759,41 +4145,92 @@ app.post("/v1/desktop/enroll", async (req, res, next) => {
       typeof req.body?.clientVersion === "string"
         ? req.body.clientVersion
         : null;
+    const installIdentity = String(req.body?.installIdentity ?? "").trim();
+    if (installIdentity.length < 16 || installIdentity.length > 1024) {
+      return res.status(400).json({
+        error: "A stable desktop installation identity is required. Update Leash and try again.",
+      });
+    }
     const agents = normalizeEnrollmentAgents(req.body?.agents);
     const agentToken = `ol_${crypto.randomBytes(24).toString("base64url")}`;
-    const user = await pool.query(
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [
+      `openleash-desktop-enrollment:${session.user.id}`,
+    ]);
+    const user = await client.query(
       `update users
-       set token_hash = $2, status = 'active', last_login_at = now()
-       where id = $1 and organization_id = $3
+       set status = 'active', last_login_at = now()
+       where id = $1 and organization_id = $2
        returning id, email, display_name, organization_id`,
-      [session.user.id, hashToken(agentToken), session.organization.id],
+      [session.user.id, session.organization.id],
     );
-    if (!user.rows[0])
-      return res.status(404).json({ error: "session user not found" });
-    const computer = await pool.query(
-      `insert into computers (user_id, hostname, platform, os_release, enrolled_at, last_seen_at)
-       values ($1, $2, $3, $4, now(), now())
-       on conflict (user_id, hostname) do update set
+    if (!user.rows[0]) throw new HttpError(404, "session user not found");
+    // Authenticated legacy installs predate stable installation identities.
+    // Claim exactly one legacy row only when the user has no modern device;
+    // this preserves history without trusting a hostname or a shared token.
+    await client.query(
+      `with claimable as (
+         select legacy.id
+         from computers legacy
+         where legacy.user_id = $1
+           and legacy.install_identity is null
+           and not exists (
+             select 1 from computers modern
+             where modern.user_id = $1 and modern.install_identity is not null
+           )
+           and 1 = (
+             select count(*) from computers candidate
+             where candidate.user_id = $1 and candidate.install_identity is null
+           )
+         for update
+       )
+       update computers computer
+       set install_identity = $2, hostname = $3, platform = $4,
+           os_release = $5, enrolled_at = coalesce(computer.enrolled_at, now()),
+           last_seen_at = now()
+       from claimable
+       where computer.id = claimable.id`,
+      [session.user.id, installIdentity, hostname, platform, osRelease],
+    );
+    const computer = await client.query(
+      `insert into computers (user_id, hostname, platform, os_release, install_identity, enrolled_at, last_seen_at)
+       values ($1, $2, $3, $4, $5, now(), now())
+       on conflict (user_id, install_identity) where install_identity is not null do update set
+         hostname = excluded.hostname,
          platform = excluded.platform,
          os_release = excluded.os_release,
          enrolled_at = coalesce(computers.enrolled_at, now()),
          last_seen_at = now()
-       returning id, hostname, platform, os_release, enrolled_at, last_seen_at`,
-      [session.user.id, hostname, platform, osRelease],
+       returning id, hostname, platform, os_release, install_identity, enrolled_at, last_seen_at`,
+      [session.user.id, hostname, platform, osRelease, installIdentity],
     );
-    await upsertDesktopAgentInventory(
-      computer.rows[0].id,
-      agents,
-      clientVersion,
+    await client.query(
+      `insert into desktop_credentials (
+         organization_id, user_id, computer_id, token_hash, last_seen_at
+       ) values ($1, $2, $3, $4, now())
+       on conflict (computer_id) do update set
+         organization_id = excluded.organization_id,
+         user_id = excluded.user_id,
+         token_hash = excluded.token_hash,
+         revoked_at = null,
+         last_seen_at = now()`,
+      [
+        session.organization.id,
+        session.user.id,
+        computer.rows[0].id,
+        hashToken(agentToken),
+      ],
     );
     if (enrollmentSession) {
-      await pool.query(
+      await client.query(
         `update dashboard_sessions
          set revoked_at = now(), last_seen_at = now()
          where token_hash = $1 and provider = 'desktop_enrollment'`,
         [hashToken(bearerToken(authorization) ?? "")],
       );
     }
+    await client.query("commit");
+    await upsertDesktopAgentInventory(computer.rows[0].id, agents, clientVersion);
     res.status(201).json({
       token: agentToken,
       user: user.rows[0],
@@ -3804,7 +4241,10 @@ app.post("/v1/desktop/enroll", async (req, res, next) => {
       rulesManagedBy: "openleash-cloud",
     });
   } catch (error) {
+    await client.query("rollback").catch(() => undefined);
     next(error);
+  } finally {
+    client.release();
   }
 });
 
@@ -3820,17 +4260,51 @@ app.post("/v1/desktop/agents", async (req, res, next) => {
     const platform = String(req.body?.platform ?? "unknown");
     const osRelease =
       typeof req.body?.osRelease === "string" ? req.body.osRelease : null;
+    const installIdentity = String(req.body?.installIdentity ?? "").trim();
+    if (installIdentity.length < 16 || installIdentity.length > 1024) {
+      return res.status(400).json({
+        error: "A stable desktop installation identity is required. Update Leash and try again.",
+      });
+    }
     const agents = normalizeEnrollmentAgents(req.body?.agents);
+    if (session.source === "client" && session.computerId) {
+      const computer = await pool.query(
+        `update computers
+         set hostname = $3, platform = $4, os_release = $5,
+             install_identity = coalesce(install_identity, $6),
+             enrolled_at = coalesce(enrolled_at, now()), last_seen_at = now()
+         where id = $1 and user_id = $2
+           and (install_identity = $6 or install_identity is null)
+         returning id, hostname, platform, os_release, install_identity, enrolled_at, last_seen_at`,
+        [session.computerId, session.user.id, hostname, platform, osRelease, installIdentity],
+      );
+      if (!computer.rows[0]) {
+        return res.status(409).json({
+          error: "This desktop credential belongs to a different Leash installation.",
+        });
+      }
+      const clientVersion =
+        typeof req.body?.clientVersion === "string"
+          ? req.body.clientVersion
+          : null;
+      await upsertDesktopAgentInventory(
+        computer.rows[0].id,
+        agents,
+        clientVersion,
+      );
+      return res.json({ ok: true, computer: computer.rows[0], agents });
+    }
     const computer = await pool.query(
-      `insert into computers (user_id, hostname, platform, os_release, enrolled_at, last_seen_at)
-       values ($1, $2, $3, $4, now(), now())
-       on conflict (user_id, hostname) do update set
+      `insert into computers (user_id, hostname, platform, os_release, install_identity, enrolled_at, last_seen_at)
+       values ($1, $2, $3, $4, $5, now(), now())
+       on conflict (user_id, install_identity) where install_identity is not null do update set
+         hostname = excluded.hostname,
          platform = excluded.platform,
          os_release = excluded.os_release,
          enrolled_at = coalesce(computers.enrolled_at, now()),
          last_seen_at = now()
-       returning id, hostname, platform, os_release, enrolled_at, last_seen_at`,
-      [session.user.id, hostname, platform, osRelease],
+       returning id, hostname, platform, os_release, install_identity, enrolled_at, last_seen_at`,
+      [session.user.id, hostname, platform, osRelease, installIdentity],
     );
     const clientVersion =
       typeof req.body?.clientVersion === "string"
@@ -5352,20 +5826,18 @@ app.post("/v1/skills/observations", async (req, res, next) => {
         const conversationEventName =
           skillEventType === "detected" ? "SkillDetected" : "SkillChanged";
         const skillPluginRuns = skillScan.run ? [skillScan.run] : [];
-        const computer = await client.query(
-          `insert into computers (user_id, hostname, platform, last_seen_at)
-           values ($1, $2, $3, now())
-           on conflict (user_id, hostname) do update set last_seen_at = now()
-           returning id`,
-          [user.id, req.hostname || "unknown", "unknown"],
-        );
+        const computerId = await upsertActivityComputer(client, user, {
+          hostname: req.hostname || "unknown",
+          platform: "unknown",
+          osRelease: null,
+        });
         const runtime = await client.query(
           `insert into agent_runtimes (computer_id, kind, display_name, executable_path, last_seen_at)
            values ($1, $2, $3, $4, now())
            on conflict (computer_id, kind, executable_path_key) do update set display_name = excluded.display_name, last_seen_at = now()
            returning id`,
           [
-            computer.rows[0].id,
+            computerId,
             body.agentKind ?? "unknown",
             body.agentName ?? "Local agent",
             "",
@@ -5378,7 +5850,7 @@ app.post("/v1/skills/observations", async (req, res, next) => {
            returning id`,
           [
             user.id,
-            computer.rows[0].id,
+            computerId,
             runtime.rows[0].id,
             `skill:${skillPath}`,
             conversationEventName,
@@ -5413,7 +5885,7 @@ app.post("/v1/skills/observations", async (req, res, next) => {
         evaluationId = evaluation.rows[0].id;
         signalContext = {
           eventId: event.rows[0].id,
-          computerId: computer.rows[0].id,
+          computerId,
           runtimeId: runtime.rows[0].id,
         };
         await client.query(
@@ -6234,7 +6706,59 @@ type ApiUser = {
   email?: string;
   display_name?: string;
   organization_id?: string | null;
+  desktop_computer_id?: string | null;
 };
+
+async function upsertActivityComputer(
+  client: PoolClient,
+  user: ApiUser,
+  computer: { hostname: string; platform: string; osRelease?: string | null },
+) {
+  if (user.desktop_computer_id) {
+    const bound = await client.query<{ id: string }>(
+      `update computers
+       set hostname = $3, platform = $4, os_release = $5, last_seen_at = now()
+       where id = $1 and user_id = $2
+       returning id`,
+      [
+        user.desktop_computer_id,
+        user.id,
+        computer.hostname,
+        computer.platform,
+        computer.osRelease ?? null,
+      ],
+    );
+    if (!bound.rows[0]) {
+      throw new HttpError(
+        409,
+        "This desktop credential is no longer bound to an enrolled computer.",
+      );
+    }
+    return bound.rows[0].id;
+  }
+
+  // Legacy/local tokens retain hostname reconciliation. A managed Cloud
+  // database rejects any new computer without an installation identity, so
+  // this cannot bypass hosted device capacity.
+  await client.query("select pg_advisory_xact_lock(hashtext($1))", [
+    `openleash-legacy-computer:${user.id}`,
+  ]);
+  const existing = await client.query<{ id: string }>(
+    `update computers
+     set platform = $3, os_release = $4, last_seen_at = now()
+     where user_id = $1 and hostname = $2 and install_identity is null
+     returning id`,
+    [user.id, computer.hostname, computer.platform, computer.osRelease ?? null],
+  );
+  if (existing.rows[0]) return existing.rows[0].id;
+  const inserted = await client.query<{ id: string }>(
+    `insert into computers (user_id, hostname, platform, os_release, last_seen_at)
+     values ($1, $2, $3, $4, now())
+     returning id`,
+    [user.id, computer.hostname, computer.platform, computer.osRelease ?? null],
+  );
+  return inserted.rows[0].id;
+}
 
 async function handlePromptOnlyHook(
   agent: HookAgentSlug,
@@ -8959,19 +9483,11 @@ async function recordConversationEvent(
     user.organization_id ?? (await ensureDefaultOrganization()).id;
   try {
     await client.query("begin");
-    const computer = await client.query(
-      `insert into computers (user_id, hostname, platform, os_release, last_seen_at)
-       values ($1, $2, $3, $4, now())
-       on conflict (user_id, hostname) do update set platform = excluded.platform, os_release = excluded.os_release, last_seen_at = now()
-       returning id`,
-      [
-        user.id,
-        request.computer.hostname,
-        request.computer.platform,
-        request.computer.osRelease ?? null,
-      ],
-    );
-    computerId = computer.rows[0].id;
+    computerId = await upsertActivityComputer(client, user, {
+      hostname: request.computer.hostname,
+      platform: request.computer.platform,
+      osRelease: request.computer.osRelease ?? null,
+    });
     const runtime = await client.query(
       `insert into agent_runtimes (computer_id, kind, display_name, version, executable_path, last_seen_at)
        values ($1, $2, $3, $4, $5, now())
@@ -9950,19 +10466,21 @@ async function resolveManagedMobileOrganization(
 ): Promise<ManagedOrganization> {
   const email = profile.email.toLowerCase();
   const domain = email.split("@")[1]?.trim() ?? "";
-  const domainSlug = domain
-    ? slugifyTenant(domain.split(".")[0] ?? domain)
-    : "";
+  if (audience === "organization" && domain) {
+    const organization = await resolveOrganizationForWorkDomain(domain);
+    return {
+      ...organization,
+      defaultUserRole: await initialOrganizationLoginRole(organization.id),
+    };
+  }
+  const personal = await resolvePersonalCloudOrganization(profile);
+  if (personal) return { ...personal, defaultUserRole: "owner" };
   const configuredSlug =
-    audience === "organization"
-      ? domainSlug
-      : (process.env.OPENLEASH_MANAGED_MOBILE_ORG_SLUG ??
-        process.env.OPENLEASH_DEV_ORG_SLUG);
+    process.env.OPENLEASH_MANAGED_MOBILE_ORG_SLUG ??
+    process.env.OPENLEASH_DEV_ORG_SLUG;
   const existing = configuredSlug
     ? await getOrganizationBySlug(configuredSlug)
-    : domain
-      ? await getOrganizationBySlug(domainSlug)
-      : undefined;
+    : undefined;
   if (existing) {
     const configuredName =
       process.env.OPENLEASH_MANAGED_MOBILE_ORG_NAME?.trim();
@@ -9985,34 +10503,223 @@ async function resolveManagedMobileOrganization(
     }
     return {
       ...existing,
-      defaultUserRole:
-        audience === "organization"
-          ? await initialOrganizationLoginRole(existing.id)
-          : "engineer",
+      defaultUserRole: "engineer",
     };
-  }
-
-  if (audience === "organization" && domainSlug) {
-    const accountPackage = accountPackageForNewSession(audience);
-    const result = await pool.query(
-      `insert into organizations (name, slug, region, setup_completed, current_step, deployment_mode, infrastructure_config)
-       values ($1, $2, $3, false, 1, 'cloud', jsonb_build_object('accountPackage', $4::text))
-       on conflict (slug) do update set updated_at = now()
-       returning id, name, slug, region, setup_completed, current_step, deployment_mode`,
-      [
-        organizationNameFromDomain(domain),
-        domainSlug,
-        process.env.OPENLEASH_ORG_REGION ?? null,
-        accountPackage,
-      ],
-    );
-    return { ...result.rows[0], defaultUserRole: "admin" };
   }
 
   return {
     ...(await ensureManagedMobileOrganization()),
-    defaultUserRole: audience === "organization" ? "admin" : "engineer",
+    defaultUserRole: "engineer",
   };
+}
+
+async function resolvePersonalCloudOrganization(
+  profile: ManagedAuthProfile,
+): Promise<ManagedOrganization | undefined> {
+  const email = profile.email.trim().toLowerCase();
+  if (!email) return undefined;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [
+      `openleash-personal-workspace:${email}`,
+    ]);
+    const existing = await client.query(
+      `select o.*,u.id as personal_user_id,
+              (select count(*)::int from users members
+               where members.organization_id=o.id and members.status='active') as active_user_count
+       from users u
+       join organizations o on o.id = u.organization_id
+       where lower(u.email) = lower($1)
+       limit 1
+       for update of u`,
+      [email],
+    );
+    if (existing.rows[0]) {
+      const row = existing.rows[0] as ManagedOrganization & {
+        personal_user_id: string;
+        active_user_count: number;
+        infrastructure_config?: Record<string, unknown>;
+      };
+      const config = row.infrastructure_config ?? {};
+      const explicitlyPersonal =
+        config.accountAudience === "individual" ||
+        config.accountPackage === "personal_cloud";
+      const explicitlyBusiness =
+        config.accountAudience === "organization" ||
+        config.accountPackage === "work-managed";
+      if (explicitlyBusiness) {
+        throw new HttpError(
+          409,
+          "This work email already belongs to a Business workspace. Continue with Business instead.",
+        );
+      }
+      if (explicitlyPersonal && Number(row.active_user_count) <= 1) {
+        await client.query("commit");
+        return row;
+      }
+
+      // Legacy Personal identities were once pooled in one development
+      // workspace. Split them on their next sign-in without carrying another
+      // person's data or credentials into the new tenant.
+      await client.query(
+        `update dashboard_sessions set revoked_at=coalesce(revoked_at,now()) where user_id=$1`,
+        [row.personal_user_id],
+      );
+      if ((await client.query<{ exists: boolean }>(
+        `select to_regclass('desktop_credentials') is not null as exists`,
+      )).rows[0]?.exists) {
+        await client.query(
+          `update desktop_credentials set revoked_at=coalesce(revoked_at,now()) where user_id=$1`,
+          [row.personal_user_id],
+        );
+      }
+      await client.query(
+        `update mobile_devices set push_token=null where user_id=$1`,
+        [row.personal_user_id],
+      );
+      await client.query(
+        `update users
+         set email=concat('isolated-',id::text,'@personal.invalid'),
+             status='disabled',token_hash=null,idp_user_id=null,idp_provider=null,
+             metadata=coalesce(metadata,'{}'::jsonb)
+               || jsonb_build_object('isolatedPersonalWorkspaceAt',now()::text,'previousEmail',$2::text)
+         where id=$1`,
+        [row.personal_user_id, email],
+      );
+    }
+    const suffix = crypto.createHash("sha256").update(email).digest("hex").slice(0, 16);
+    const inserted = await client.query(
+      `insert into organizations (
+         name, slug, region, setup_completed, current_step, deployment_mode, infrastructure_config
+       ) values (
+         'Personal workspace', $1, $2, true, 6, 'cloud',
+         jsonb_build_object('accountPackage', 'personal_cloud', 'accountAudience', 'individual')
+       )
+       on conflict (slug) do update set updated_at = now()
+       returning *`,
+      [`personal-${suffix}`, process.env.OPENLEASH_ORG_REGION ?? null],
+    );
+    await client.query("commit");
+    return inserted.rows[0] as ManagedOrganization;
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function resolveOrganizationForWorkDomain(
+  rawDomain: string,
+): Promise<ManagedOrganization> {
+  const domain = rawDomain.trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+  if (!domain || !/^[a-z0-9.-]+$/.test(domain)) {
+    throw new HttpError(400, "A valid company email domain is required");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    // Serializes the first login for one domain without blocking unrelated
+    // companies. A mailbox login observes the domain; it does not claim that
+    // the employee is an IdP administrator or that the domain is DNS-verified.
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [
+      `openleash-company-domain:${domain}`,
+    ]);
+    const mapped = await client.query(
+      `select o.*
+       from organization_domains domain_map
+       join organizations o on o.id = domain_map.organization_id
+       where domain_map.normalized_domain = $1
+       limit 1`,
+      [domain],
+    );
+    if (mapped.rows[0]) {
+      await client.query("commit");
+      return mapped.rows[0] as ManagedOrganization;
+    }
+
+    // Never infer company ownership from arbitrary users who happen to share
+    // an email suffix. Legacy Personal accounts lived in a shared workspace;
+    // adopting it here would cross tenant boundaries. A first Business login
+    // always creates a distinct company workspace under the domain lock.
+    const accountPackage = accountPackageForNewSession("organization");
+    const baseSlug = slugifyTenant(domain);
+    const fallbackSlug = `${baseSlug.slice(0, 39)}-${crypto
+      .createHash("sha256")
+      .update(domain)
+      .digest("hex")
+      .slice(0, 8)}`;
+    const inserted = await client.query(
+        `insert into organizations (
+           name, slug, region, setup_completed, current_step, deployment_mode, infrastructure_config
+         ) values (
+           $1, $2, $3, false, 1, 'cloud',
+           jsonb_build_object(
+             'accountPackage', $4::text,
+             'identityDomain', $5::text,
+             'domainJoinPolicy', 'invite_only'
+           )
+         )
+         on conflict (slug) do nothing
+         returning *`,
+        [
+          organizationNameFromDomain(domain),
+          baseSlug,
+          process.env.OPENLEASH_ORG_REGION ?? null,
+          accountPackage,
+          domain,
+        ],
+    );
+    let organization = inserted.rows[0] as ManagedOrganization | undefined;
+    if (!organization) {
+      const fallback = await client.query(
+          `insert into organizations (
+             name, slug, region, setup_completed, current_step, deployment_mode, infrastructure_config
+           ) values (
+             $1, $2, $3, false, 1, 'cloud',
+             jsonb_build_object(
+               'accountPackage', $4::text,
+               'identityDomain', $5::text,
+               'domainJoinPolicy', 'invite_only'
+             )
+           )
+           returning *`,
+          [
+            organizationNameFromDomain(domain),
+            fallbackSlug,
+            process.env.OPENLEASH_ORG_REGION ?? null,
+            accountPackage,
+            domain,
+          ],
+      );
+      organization = fallback.rows[0] as ManagedOrganization;
+    }
+
+    await client.query(
+      `insert into organization_domains (
+         normalized_domain, organization_id, status, verification_method, updated_at
+       ) values ($1, $2, 'observed', 'oauth_email_domain', now())
+       on conflict (normalized_domain) do nothing`,
+      [domain, organization.id],
+    );
+    await client.query(
+      `update organizations
+       set infrastructure_config = coalesce(infrastructure_config, '{}'::jsonb)
+         || jsonb_build_object('identityDomain', $2::text),
+           updated_at = now()
+       where id = $1`,
+      [organization.id, domain],
+    );
+    await client.query("commit");
+    return organization;
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function initialOrganizationLoginRole(organizationId: string) {
@@ -10064,6 +10771,16 @@ function organizationNameFromDomain(domain: string) {
       .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
       .join(" ") || "Company"
   );
+}
+
+function displayNameFromEmail(email: string) {
+  const localPart = email.split("@")[0]?.trim() ?? "";
+  const displayName = localPart
+    .split(/[._+-]+/g)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+  return displayName || "Leash user";
 }
 
 function isPersonalEmailDomain(email: string) {
@@ -10405,45 +11122,136 @@ async function buildMobileGoogleAuthorizationUrl(
   );
 }
 
-function encodeMobileAuthState(state: {
-  nonce: string;
+type OAuthLoginState = {
+  providerType: string;
+  audience: "individual" | "organization";
+  organizationId?: string;
+  organizationSlug?: string;
   finalRedirectUri: string;
-  exchangeRedirectUri?: string;
-}) {
-  return Buffer.from(JSON.stringify(state), "utf8").toString("base64url");
+  exchangeRedirectUri: string;
+  codeChallenge?: string;
+};
+
+async function createOAuthLoginState(context: OAuthLoginState) {
+  const state = crypto.randomBytes(32).toString("base64url");
+  await pool.query(
+    `insert into oauth_login_states (
+       state_hash, provider_type, audience, organization_id,
+       organization_slug, final_redirect_uri, exchange_redirect_uri, code_challenge,
+       expires_at
+     ) values ($1, $2, $3, $4, $5, $6, $7, $8, now() + interval '10 minutes')`,
+    [
+      hashToken(state),
+      context.providerType,
+      context.audience,
+      context.organizationId ?? null,
+      context.organizationSlug ?? null,
+      context.finalRedirectUri,
+      context.exchangeRedirectUri,
+      context.codeChallenge ?? null,
+    ],
+  );
+  return state;
 }
 
-function decodeMobileAuthState(state: string) {
-  try {
-    const parsed = JSON.parse(
-      Buffer.from(state, "base64url").toString("utf8"),
-    ) as {
-      finalRedirectUri?: unknown;
-      nonce?: unknown;
-      exchangeRedirectUri?: unknown;
-    };
-    if (
-      typeof parsed.finalRedirectUri !== "string" ||
-      typeof parsed.nonce !== "string"
-    )
-      return undefined;
-    return {
-      nonce: parsed.nonce,
-      finalRedirectUri: parsed.finalRedirectUri,
-      exchangeRedirectUri:
-        typeof parsed.exchangeRedirectUri === "string"
-          ? parsed.exchangeRedirectUri
-          : undefined,
-    };
-  } catch {
-    return undefined;
-  }
+async function activeOAuthLoginState(
+  state: string,
+  expectedProviderType: string,
+) {
+  if (!validOAuthState(state)) return undefined;
+  const result = await pool.query<{
+    provider_type: string;
+    audience: "individual" | "organization";
+    organization_id: string | null;
+    organization_slug: string | null;
+    final_redirect_uri: string;
+    exchange_redirect_uri: string;
+  }>(
+    `select provider_type, audience, organization_id, organization_slug,
+            final_redirect_uri, exchange_redirect_uri
+     from oauth_login_states
+     where state_hash = $1
+       and provider_type = $2
+       and consumed_at is null
+       and expires_at > now()
+     limit 1`,
+    [hashToken(state), expectedProviderType],
+  );
+  const row = result.rows[0];
+  if (!row) return undefined;
+  return {
+    providerType: row.provider_type,
+    audience: row.audience,
+    organizationId: row.organization_id ?? undefined,
+    organizationSlug: row.organization_slug ?? undefined,
+    finalRedirectUri: row.final_redirect_uri,
+    exchangeRedirectUri: row.exchange_redirect_uri,
+  } satisfies OAuthLoginState;
+}
+
+async function consumeOAuthLoginState({
+  state,
+  providerType,
+  audience,
+  organizationId,
+  organizationSlug,
+  exchangeRedirectUri,
+  codeVerifier,
+}: {
+  state: string;
+  providerType: string;
+  audience: "individual" | "organization";
+  organizationId?: string;
+  organizationSlug?: string;
+  exchangeRedirectUri: string;
+  codeVerifier?: string;
+}) {
+  if (!validOAuthState(state)) return false;
+  const codeChallenge = codeVerifier && validPkceValue(codeVerifier)
+    ? crypto.createHash("sha256").update(codeVerifier).digest("base64url")
+    : null;
+  const result = await pool.query(
+    `update oauth_login_states
+     set consumed_at = now()
+     where state_hash = $1
+       and provider_type = $2
+       and audience = $3
+       and organization_id is not distinct from $4::uuid
+       and coalesce(organization_slug, '') = coalesce($5::text, '')
+       and exchange_redirect_uri = $6
+       and code_challenge is not distinct from $7::text
+       and consumed_at is null
+       and expires_at > now()
+     returning id`,
+    [
+      hashToken(state),
+      providerType,
+      audience,
+      organizationId ?? null,
+      organizationSlug ?? null,
+      exchangeRedirectUri,
+      codeChallenge,
+    ],
+  );
+  return (result.rowCount ?? 0) === 1;
+}
+
+function validOAuthState(state: string) {
+  return /^[A-Za-z0-9_-]{43}$/.test(state);
 }
 
 function isAllowedAuthRedirectUri(redirectUri: string) {
   try {
     const url = new URL(redirectUri);
-    if (url.protocol === "openleash:") return true;
+    if (url.protocol === "openleash:") {
+      return url.hostname === "auth" &&
+        url.pathname === "/callback" &&
+        !url.username &&
+        !url.password &&
+        !url.port &&
+        !url.search &&
+        !url.hash;
+    }
     if (
       (url.protocol === "http:" || url.protocol === "https:") &&
       ["localhost", "127.0.0.1"].includes(url.hostname)
@@ -10561,144 +11369,379 @@ async function createDashboardSessionFromProfile({
   accountAudience?: "individual" | "organization";
   issueDesktopEnrollmentToken?: boolean;
 }) {
-  const organizationResult = await pool.query(
-    `select id, name, slug, region, setup_completed, infrastructure_config from organizations where id = $1 limit 1`,
-    [organizationId],
-  );
-  const organization = organizationResult.rows[0];
-  if (!organization) throw new Error("Organization not found");
-  const accountPackage =
-    normalizeAccountPackage(organization.infrastructure_config?.accountPackage) ??
-    accountPackageForNewSession(accountAudience);
-  const profileNameParts = splitProfileName(profile.name || "");
-  const firstName = profile.givenName || profileNameParts.givenName;
-  const lastName = profile.familyName || profileNameParts.familyName;
-  const displayName =
-    [firstName, lastName].filter(Boolean).join(" ") ||
-    profile.name ||
-    profile.email.split("@")[0] ||
-    "Leash user";
-  const userEmail = profile.email.toLowerCase();
-  const userResult = provisionUser
-    ? await pool.query<{
-        id: string;
-        email: string;
-        display_name: string;
-        role: string;
-      }>(
-        `insert into users (organization_id, email, display_name, role, first_name, last_name, idp_user_id, idp_provider, status, last_login_at, metadata)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, 'active', now(), $9)
-     on conflict (email) do update set
-       organization_id = excluded.organization_id,
-       display_name = excluded.display_name,
-       role = case
-         when users.organization_id is distinct from excluded.organization_id then excluded.role
-         when users.role in ('owner', 'admin', 'ciso', 'security_admin') then users.role
-         else excluded.role
-       end,
-       first_name = excluded.first_name,
-       last_name = excluded.last_name,
-       idp_user_id = excluded.idp_user_id,
-       idp_provider = excluded.idp_provider,
-       status = 'active',
-       last_login_at = now(),
-       metadata = coalesce(users.metadata, '{}'::jsonb) || excluded.metadata
-     returning id, email, display_name, role`,
-        [
-          organizationId,
-          userEmail,
-          displayName,
-          role,
-          firstName,
-          lastName,
-          profile.subject,
-          providerType,
-          JSON.stringify({
-            ssoProfile: profile.raw,
-            mobile: true,
-            accountAudience,
-            accountPackage,
-          }),
-        ],
-      )
-    : await pool.query<{
-        id: string;
-        email: string;
-        display_name: string;
-        role: string;
-      }>(
-        `update users
-         set last_login_at = now(),
-             idp_user_id = coalesce(users.idp_user_id, $3),
-             idp_provider = coalesce(users.idp_provider, $4),
-             metadata = coalesce(users.metadata, '{}'::jsonb) || $5::jsonb
-         where organization_id = $1
-           and lower(email) = lower($2)
-           and status = 'active'
-         returning id, email, display_name, role`,
-        [
-          organizationId,
-          userEmail,
-          profile.subject || null,
-          providerType || null,
-          JSON.stringify({ ssoProfile: profile.raw, accountAudience, accountPackage }),
-        ],
-      );
-  if (!userResult.rows[0] && !provisionUser) {
-    const error = new Error(
-      accountAudience === "organization"
-        ? "This account is not provisioned for this OpenLeash organization. Ask an admin to sync or invite your identity first."
-        : "No OpenLeash account exists for this email. Create your account from desktop or the web, then sign in on mobile.",
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const organizationResult = await client.query(
+      `select id, name, slug, region, setup_completed, infrastructure_config
+       from organizations where id = $1 limit 1`,
+      [organizationId],
     );
-    (error as Error & { status?: number }).status = 403;
-    throw error;
-  }
-  const sessionToken = `ols_${crypto.randomBytes(32).toString("base64url")}`;
-  const expiresAt = new Date(
-    Date.now() +
-      Number(process.env.OPENLEASH_DASHBOARD_SESSION_DAYS ?? 14) * 86400000,
-  );
-  await pool.query(
-    `insert into dashboard_sessions (organization_id, user_id, token_hash, provider, expires_at)
-     values ($1, $2, $3, $4, $5)`,
-    [
-      organizationId,
-      userResult.rows[0].id,
-      hashToken(sessionToken),
-      providerType,
-      expiresAt.toISOString(),
-    ],
-  );
-  const desktopEnrollmentToken = issueDesktopEnrollmentToken
-    ? `ole_${crypto.randomBytes(24).toString("base64url")}`
-    : undefined;
-  if (desktopEnrollmentToken) {
-    const enrollmentExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    await pool.query(
+    const organization = organizationResult.rows[0];
+    if (!organization) throw new Error("Organization not found");
+    const accountPackage =
+      normalizeAccountPackage(organization.infrastructure_config?.accountPackage) ??
+      accountPackageForNewSession(accountAudience);
+    const profileNameParts = splitProfileName(profile.name || "");
+    const firstName = profile.givenName || profileNameParts.givenName;
+    const lastName = profile.familyName || profileNameParts.familyName;
+    const displayName =
+      [firstName, lastName].filter(Boolean).join(" ") ||
+      profile.name ||
+      profile.email.split("@")[0] ||
+      "Leash user";
+    const userEmail = profile.email.toLowerCase();
+    const membership = provisionUser && accountAudience === "organization"
+      ? await authorizeBusinessProvisioning(client, organizationId, userEmail, role)
+      : { role };
+    if (provisionUser && accountAudience === "organization") {
+      await retirePersonalAccountForBusiness(
+        client,
+        userEmail,
+        organizationId,
+      );
+    }
+    const sessionMetadata = JSON.stringify({
+      ssoProfile: profile.raw,
+      mobile: true,
+      accountAudience,
+      accountPackage,
+      ...(membership.grantId
+        ? { membershipApproval: "grant", membershipGrantId: membership.grantId }
+        : {}),
+    });
+    const userResult = provisionUser
+      ? await client.query<{
+          id: string;
+          email: string;
+          display_name: string;
+          role: string;
+        }>(
+          `insert into users (organization_id, email, display_name, role, first_name, last_name, idp_user_id, idp_provider, status, last_login_at, metadata)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, 'active', now(), $9)
+           on conflict (email) do update set
+             display_name = excluded.display_name,
+             role = case
+               when users.role in ('owner', 'admin', 'ciso', 'security_admin') then users.role
+               else excluded.role
+             end,
+             first_name = excluded.first_name,
+             last_name = excluded.last_name,
+             idp_user_id = excluded.idp_user_id,
+             idp_provider = excluded.idp_provider,
+             status = 'active',
+             last_login_at = now(),
+             metadata = coalesce(users.metadata, '{}'::jsonb) || excluded.metadata
+           where users.organization_id = excluded.organization_id
+           returning id, email, display_name, role`,
+          [
+            organizationId,
+            userEmail,
+            displayName,
+            membership.role,
+            firstName,
+            lastName,
+            profile.subject,
+            providerType,
+            sessionMetadata,
+          ],
+        )
+      : await client.query<{
+          id: string;
+          email: string;
+          display_name: string;
+          role: string;
+        }>(
+          `update users
+           set last_login_at = now(),
+               idp_user_id = coalesce(users.idp_user_id, $3),
+               idp_provider = coalesce(users.idp_provider, $4),
+               metadata = coalesce(users.metadata, '{}'::jsonb) || $5::jsonb
+           where organization_id = $1
+             and lower(email) = lower($2)
+             and status = 'active'
+           returning id, email, display_name, role`,
+          [
+            organizationId,
+            userEmail,
+            profile.subject || null,
+            providerType || null,
+            sessionMetadata,
+          ],
+        );
+    if (!userResult.rows[0]) {
+      if (!provisionUser) {
+        throw new HttpError(
+          403,
+          accountAudience === "organization"
+            ? "This account is not provisioned for this Leash organization. Ask an admin to sync or invite your identity first."
+            : "No Leash account exists for this email. Create your account from desktop or the web, then sign in on mobile.",
+        );
+      }
+      throw new HttpError(
+        409,
+        "This email already belongs to another Leash workspace. Sign in to that workspace or ask its administrator to remove the account first.",
+      );
+    }
+    if (membership.grantId) {
+      await client.query(
+        `update organization_membership_grants
+         set consumed_at = coalesce(consumed_at, now()),
+             consumed_by = coalesce(consumed_by, $2)
+         where id = $1 and organization_id = $3`,
+        [membership.grantId, userResult.rows[0].id, organizationId],
+      );
+    }
+    const sessionToken = `ols_${crypto.randomBytes(32).toString("base64url")}`;
+    const expiresAt = new Date(
+      Date.now() +
+        Number(process.env.OPENLEASH_DASHBOARD_SESSION_DAYS ?? 14) * 86400000,
+    );
+    await client.query(
       `insert into dashboard_sessions (organization_id, user_id, token_hash, provider, expires_at)
-       values ($1, $2, $3, 'desktop_enrollment', $4)`,
+       values ($1, $2, $3, $4, $5)`,
       [
         organizationId,
         userResult.rows[0].id,
-        hashToken(desktopEnrollmentToken),
-        enrollmentExpiresAt.toISOString(),
+        hashToken(sessionToken),
+        providerType,
+        expiresAt.toISOString(),
       ],
     );
+    const desktopEnrollmentToken = issueDesktopEnrollmentToken
+      ? `ole_${crypto.randomBytes(24).toString("base64url")}`
+      : undefined;
+    if (desktopEnrollmentToken) {
+      const enrollmentExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      await client.query(
+        `insert into dashboard_sessions (organization_id, user_id, token_hash, provider, expires_at)
+         values ($1, $2, $3, 'desktop_enrollment', $4)`,
+        [
+          organizationId,
+          userResult.rows[0].id,
+          hashToken(desktopEnrollmentToken),
+          enrollmentExpiresAt.toISOString(),
+        ],
+      );
+    }
+    await client.query("commit");
+    return {
+      success: true,
+      ...(desktopEnrollmentToken ? { desktopEnrollmentToken } : {}),
+      token: sessionToken,
+      sessionToken,
+      tokens: { accessToken: sessionToken, expiresAt: expiresAt.toISOString() },
+      user: userResult.rows[0],
+      organization,
+      account: {
+        audience: accountAudience,
+        packageId: accountPackage,
+      },
+      evaluationProvider: await tenantModelKeySummary(organizationId),
+    };
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
-  return {
-    success: true,
-    ...(desktopEnrollmentToken ? { desktopEnrollmentToken } : {}),
-    token: sessionToken,
-    sessionToken,
-    tokens: { accessToken: sessionToken, expiresAt: expiresAt.toISOString() },
-    user: userResult.rows[0],
-    organization,
-    account: {
-      audience: accountAudience,
-      packageId: accountPackage,
-    },
-    evaluationProvider: await tenantModelKeySummary(organizationId),
-  };
+}
+
+async function retirePersonalAccountForBusiness(
+  client: PoolClient,
+  email: string,
+  targetOrganizationId: string,
+) {
+  const existing = await client.query<{
+    id: string;
+    organization_id: string;
+    organization_slug: string;
+    infrastructure_config: Record<string, unknown> | null;
+  }>(
+    `select u.id, u.organization_id, o.slug as organization_slug,
+            o.infrastructure_config
+     from users u
+     join organizations o on o.id = u.organization_id
+     where lower(u.email) = lower($1)
+     limit 1
+     for update of u`,
+    [email],
+  );
+  const account = existing.rows[0];
+  if (!account || account.organization_id === targetOrganizationId) return;
+  const configuredLegacySlug = slugifyTenant(
+    process.env.OPENLEASH_MANAGED_MOBILE_ORG_SLUG ??
+      process.env.OPENLEASH_DEV_ORG_SLUG ??
+      "openleash-dev",
+  );
+  const personalWorkspace =
+    account.infrastructure_config?.accountAudience === "individual" ||
+    account.infrastructure_config?.accountPackage === "personal_cloud" ||
+    account.organization_slug === configuredLegacySlug;
+  if (!personalWorkspace) return;
+
+  const hasCloudBilling = await client.query<{ exists: boolean }>(
+    `select to_regclass('cloud_billing_accounts') is not null as exists`,
+  );
+  if (hasCloudBilling.rows[0]?.exists) {
+    const paid = await client.query<{ provider_subscription_id: string | null }>(
+      `select provider_subscription_id
+       from cloud_billing_accounts
+       where organization_id=$1
+         and provider_subscription_id is not null
+         and (
+           lower(status) in ('active','paid','past_due','on_trial','trialing')
+           or (
+             lower(status) in ('cancelled','canceled')
+             and coalesce(ends_at,current_period_end) > now()
+           )
+         )
+       limit 1
+       for update`,
+      [account.organization_id],
+    );
+    if (paid.rows[0]?.provider_subscription_id) {
+      throw new HttpError(
+        409,
+        "Change your Personal Cloud subscription before joining a Business workspace so Leash never bills both accounts.",
+      );
+    }
+    await client.query(
+      `update cloud_billing_accounts
+       set status='cancelled',trial_ends_at=least(coalesce(trial_ends_at,now()),now()),updated_at=now()
+       where organization_id=$1
+         and provider_subscription_id is null
+         and lower(status) in ('pending','trial_pending','on_trial','trialing')`,
+      [account.organization_id],
+    );
+  }
+
+  // A Personal identity and its history are not silently transplanted into an
+  // employer workspace. Retire its credentials, preserve its audit records in
+  // the Personal tenant, and let the upsert below create a fresh Business user.
+  await client.query(
+    `update dashboard_sessions
+     set revoked_at = coalesce(revoked_at, now())
+     where user_id = $1`,
+    [account.id],
+  );
+  if ((await client.query<{ exists: boolean }>(
+    `select to_regclass('desktop_credentials') is not null as exists`,
+  )).rows[0]?.exists) {
+    await client.query(
+      `update desktop_credentials
+       set revoked_at=coalesce(revoked_at,now())
+       where user_id=$1`,
+      [account.id],
+    );
+  }
+  await client.query(
+    `update mobile_devices
+     set push_token=null
+     where user_id=$1`,
+    [account.id],
+  );
+  await client.query(
+    `update users
+     set email = concat('converted-',id::text,'@personal.invalid'),
+         status = 'disabled',
+         token_hash = null,
+         idp_user_id = null,
+         idp_provider = null,
+         metadata = coalesce(metadata, '{}'::jsonb)
+           || jsonb_build_object(
+                'convertedToBusinessOrganizationId',$2::text,
+                'convertedAt',now()::text,
+                'previousEmail',$3::text
+              )
+     where id = $1`,
+    [account.id, targetOrganizationId, email],
+  );
+}
+
+async function authorizeBusinessProvisioning(
+  client: PoolClient,
+  organizationId: string,
+  email: string,
+  requestedRole: string,
+) {
+  // Keep first-owner election and invitation consumption in the same
+  // transaction as the user insert. Domain ownership alone is not membership.
+  await client.query("select pg_advisory_xact_lock(hashtext($1))", [
+    `openleash-business-membership:${organizationId}`,
+  ]);
+  const existing = await client.query<{ role: string; status: string }>(
+    `select role, status from users
+     where organization_id = $1 and lower(email) = lower($2)
+     limit 1`,
+    [organizationId, email],
+  );
+  if (existing.rows[0]) {
+    if (existing.rows[0].status !== "active") {
+      throw new HttpError(
+        403,
+        "This Leash workspace membership is disabled. Contact your administrator.",
+      );
+    }
+    return { role: existing.rows[0].role };
+  }
+
+  const bootstrap = await client.query<{
+    member_count: number;
+    bootstrap_claimed: boolean;
+  }>(
+    `select
+       (select count(*)::int from users where organization_id=$1) as member_count,
+       coalesce(infrastructure_config->>'bootstrapAdminClaimed','false')='true' as bootstrap_claimed
+     from organizations
+     where id=$1
+     for update`,
+    [organizationId],
+  );
+  if (
+    Number(bootstrap.rows[0]?.member_count ?? 0) === 0 &&
+    !bootstrap.rows[0]?.bootstrap_claimed
+  ) {
+    await client.query(
+      `update organizations
+       set infrastructure_config=coalesce(infrastructure_config,'{}'::jsonb)
+         || jsonb_build_object(
+              'bootstrapAdminClaimed',true,
+              'bootstrapAdminClaimedAt',now()::text,
+              'bootstrapAdminEmail',lower($2::text)
+            ),
+           updated_at=now()
+       where id=$1`,
+      [organizationId, email],
+    );
+    return { role: "admin" };
+  }
+
+  const grant = await client.query<{ id: string; granted_role: string }>(
+      `select id, granted_role
+       from organization_membership_grants
+       where organization_id = $1
+         and normalized_email = lower($2)
+         and granted_role in ('engineer','viewer')
+         and consumed_at is null
+         and revoked_at is null
+         and expires_at > now()
+       order by created_at desc
+       limit 1
+       for update`,
+      [organizationId, email],
+  );
+    if (grant.rows[0]) {
+      return {
+        role: grant.rows[0].granted_role || requestedRole,
+        grantId: grant.rows[0].id,
+      };
+    }
+
+  throw new HttpError(
+    403,
+    "Your company already has a Leash workspace. Ask its administrator to invite your exact work email, or sign in through its configured identity provider.",
+  );
 }
 
 async function mobilePendingApprovals(
@@ -12058,6 +13101,7 @@ async function getClientOrDashboardSession(authHeader: string) {
   if (!row) return null;
   return {
     source: "client" as const,
+    computerId: user.desktop_computer_id ?? null,
     user: {
       id: user.id,
       email: user.email,
@@ -12174,6 +13218,17 @@ function secureTokenEquals(provided: string, expected: string) {
   const providedHash = Buffer.from(hashToken(provided));
   const expectedHash = Buffer.from(hashToken(expected));
   return crypto.timingSafeEqual(providedHash, expectedHash);
+}
+
+function secureHashEquals(providedHash: string, expectedHash: string) {
+  if (!providedHash || !expectedHash) return false;
+  const provided = Buffer.from(providedHash);
+  const expected = Buffer.from(expectedHash);
+  return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
+}
+
+function validPkceValue(value: string) {
+  return /^[A-Za-z0-9._~-]{43,128}$/.test(value);
 }
 
 function requirePluginReleaseAdmin(req: express.Request, res: express.Response) {
@@ -12513,10 +13568,7 @@ function enrollmentCommand(tenantUrl: string, token: string) {
 
 function tokenFromRequest(req: express.Request) {
   const auth = req.header("authorization") ?? "";
-  const bearer = auth.replace(/^Bearer\s+/i, "").trim();
-  const queryToken =
-    firstQuery(req.query.user_token) ?? firstQuery(req.query.token);
-  return bearer || queryToken || "";
+  return auth.replace(/^Bearer\s+/i, "").trim();
 }
 
 function firstQuery(value: unknown) {

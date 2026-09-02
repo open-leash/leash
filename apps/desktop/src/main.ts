@@ -225,6 +225,13 @@ type SessionMetrics = {
   }>;
 };
 
+type LocalAvailabilityState = {
+  state: "closed" | "open" | "half-open";
+  degraded: boolean;
+  consecutiveFailures?: number;
+  reason?: string;
+};
+
 type RemoteMobileState = {
   policies?: Array<{
     id: string;
@@ -517,6 +524,9 @@ const protectionWatchers = new Map<string, fs.FSWatcher>();
 const pendingProtectionRepairs = new Map<string, NodeJS.Timeout>();
 let protectionAuditTimer: NodeJS.Timeout | undefined;
 let repairingProtections = false;
+let proxyRestartInFlight = false;
+let proxyRestartFailures = 0;
+let proxyRestartNotBefore = 0;
 const skillWatchers = new Map<string, fs.FSWatcher>();
 const pendingSkillScans = new Map<string, NodeJS.Timeout>();
 const observedSkillHashes = new Map<string, string>();
@@ -526,8 +536,12 @@ let desktopStartupComplete = false;
 let revealExistingInstanceOnReady = false;
 let pendingDesktopAuth:
   | {
+      kind: "oauth" | "dashboard_handoff";
       apiUrl: string;
       providerType: string;
+      state: string;
+      codeVerifier?: string;
+      createdAt: number;
       exchangeRedirectUri?: string;
       organizationId?: string;
       organizationSlug?: string;
@@ -936,7 +950,34 @@ if (singleInstanceLock) app
       const desired = [...proxyStatus.configuredAgents];
       const current = await localProxyStatus();
       if (current.running) {
+        proxyRestartFailures = 0;
+        proxyRestartNotBefore = 0;
         for (const kind of desired) configureAgentProxy(kind, true);
+      } else if (
+        desired.length > 0 &&
+        localServer.setupComplete &&
+        !proxyRestartInFlight &&
+        Date.now() >= proxyRestartNotBefore
+      ) {
+        proxyRestartInFlight = true;
+        try {
+          proxyStatus = await installProxyForMonitoredAgents(desired);
+          proxyRestartFailures = 0;
+          proxyRestartNotBefore = 0;
+          startupLog("local proxy recovered after an unexpected stop");
+        } catch (error) {
+          proxyRestartFailures += 1;
+          const delay = Math.min(
+            5 * 60_000,
+            5_000 * 2 ** Math.min(proxyRestartFailures - 1, 6),
+          );
+          proxyRestartNotBefore = Date.now() + delay;
+          startupLog(
+            `local proxy restart failed; retrying in ${Math.ceil(delay / 1000)}s: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } finally {
+          proxyRestartInFlight = false;
+        }
       }
       proxyStatus = await localProxyStatus();
       refreshMenu();
@@ -1137,12 +1178,30 @@ ipcMain.handle(
     try {
       keepDockIconForSetup();
       const provider = payload.provider === "microsoft" ? "microsoft" : "google";
+      const state = crypto.randomBytes(32).toString("base64url");
+      const codeVerifier = crypto.randomBytes(32).toString("base64url");
+      const codeChallenge = crypto
+        .createHash("sha256")
+        .update(codeVerifier)
+        .digest("base64url");
+      pendingDesktopAuth = {
+        kind: "dashboard_handoff",
+        apiUrl: normalizeRemoteApiUrl(cloudApiUrl),
+        providerType: provider === "microsoft" ? "azure_ad" : "google",
+        state,
+        codeVerifier,
+        createdAt: Date.now(),
+        audience: "organization",
+      };
       const dashboardUrl = new URL(
         cloudDashboardUrl.replace(/\/$/, "") || "http://localhost:9300",
       );
       dashboardUrl.pathname = "/auth/cloud/start";
       dashboardUrl.searchParams.set("provider", provider);
       dashboardUrl.searchParams.set("desktop", "1");
+      dashboardUrl.searchParams.set("desktop_state", state);
+      dashboardUrl.searchParams.set("code_challenge", codeChallenge);
+      dashboardUrl.searchParams.set("code_challenge_method", "S256");
       await openTrustedExternalUrl(dashboardUrl.toString());
       keepDockIconForSetup();
       return { ok: true };
@@ -1197,6 +1256,11 @@ async function startMobileAuth(
   },
 ) {
   try {
+    const codeVerifier = crypto.randomBytes(32).toString("base64url");
+    const codeChallenge = crypto
+      .createHash("sha256")
+      .update(codeVerifier)
+      .digest("base64url");
     const browserRedirectUri =
       providerType === "azure_ad" || providerType === "microsoft"
         ? desktopMicrosoftRedirectUri
@@ -1218,6 +1282,8 @@ async function startMobileAuth(
           providerType,
           organizationId: payload.organizationId,
           organizationSlug: payload.organizationSlug,
+          codeChallenge,
+          codeChallengeMethod: "S256",
         }),
       },
     );
@@ -1229,14 +1295,25 @@ async function startMobileAuth(
       };
     }
     pendingDesktopAuth = {
+      kind: "oauth",
       apiUrl: remoteApiUrl,
       providerType: body.providerType || providerType,
+      state: String(body.state ?? ""),
+      codeVerifier,
+      createdAt: Date.now(),
       exchangeRedirectUri: body.exchangeRedirectUri,
       organizationId: body.organizationId || payload.organizationId,
       organizationSlug: payload.organizationSlug,
       audience:
         payload.audience === "organization" ? "organization" : "individual",
     };
+    if (!/^[A-Za-z0-9_-]{43}$/.test(pendingDesktopAuth.state)) {
+      pendingDesktopAuth = undefined;
+      return {
+        ok: false,
+        error: "This API did not return a secure sign-in state.",
+      };
+    }
     keepDockIconForSetup();
     await openTrustedExternalUrl(body.authorizationUrl);
     keepDockIconForSetup();
@@ -1274,6 +1351,7 @@ async function enrollDesktopEndpoint(
         ...apiVersionHeaders("desktopEnroll"),
       },
       body: JSON.stringify({
+        installIdentity: localServer.deviceIdentity(),
         hostname: os.hostname(),
         platform: os.platform(),
         osRelease: os.release(),
@@ -1517,6 +1595,7 @@ ipcMain.handle(
         token,
         agents: payload?.agents ?? [],
         corporateProxy: payload?.corporateProxy,
+        failOpen: localServer.availabilityFailOpen,
       });
       window?.webContents.send("openleash:update", { proxyStatus });
       return { ok: true, ...proxyStatus };
@@ -2582,7 +2661,13 @@ async function poll() {
     rememberCompletedAgentSessions(latestAttentionEvents);
     latestIslandContributions = body.islandContributions ?? [];
     presentCloudTrialStatus(billing);
-    setTrayStatus(latestPending.length > 0 ? "pending" : "ok");
+    setTrayStatus(
+      body.availability?.degraded
+        ? "down"
+        : latestPending.length > 0
+          ? "pending"
+          : "ok",
+    );
     refreshMenu();
     window?.webContents.send("openleash:update", {
       apiUrl,
@@ -2614,6 +2699,7 @@ async function poll() {
       mcpServers: localServer.mcpServers,
       skills: localServer.skills,
       billing,
+      availability: body.availability,
     });
     const nextPending = latestPending[0];
     if (nextPending) {
@@ -2751,6 +2837,7 @@ async function fetchTrayState(): Promise<
       pending: PendingDecision[];
       agents: AgentStatus[];
       sessionMetrics?: SessionMetrics;
+      availability?: LocalAvailabilityState;
       attentionEvents?: AttentionEvent[];
       islandContributions?: PluginIslandContribution[];
       plugins: PluginCatalogItem[];
@@ -2847,7 +2934,10 @@ async function fetchTrayState(): Promise<
 
 async function fetchLocalTrayState() {
   const response = await fetch(`${apiUrl}/admin/tray-status`, {
-    headers: apiVersionHeaders("tenantTrayStatus"),
+    headers: {
+      authorization: `Bearer ${localServer.token}`,
+      ...apiVersionHeaders("tenantTrayStatus"),
+    },
   });
   if (!response.ok) return undefined;
   const body = (await response.json()) as {
@@ -2855,11 +2945,13 @@ async function fetchLocalTrayState() {
     agents: AgentStatus[];
     session_metrics?: SessionMetrics;
     sessionMetrics?: SessionMetrics;
+    availability?: LocalAvailabilityState;
   };
   return {
     pending: body.pending,
     agents: body.agents,
     sessionMetrics: body.session_metrics ?? body.sessionMetrics,
+    availability: body.availability,
     plugins: localServer.plugins,
     outcomes: latestOutcomes,
     viewModel: latestViewModel,
@@ -3293,6 +3385,7 @@ function mergeTrayState(
         pending: PendingDecision[];
         agents: AgentStatus[];
         sessionMetrics?: SessionMetrics;
+        availability?: LocalAvailabilityState;
         plugins: PluginCatalogItem[];
         outcomes?: PluginOutcome[];
         viewModel?: OpenLeashClientViewModel;
@@ -3328,6 +3421,7 @@ function mergeTrayState(
     pending: [...localState.pending, ...remoteState.pending],
     agents: dedupeById([...localState.agents, ...remoteState.agents]),
     sessionMetrics: remoteState.sessionMetrics ?? localState.sessionMetrics,
+    availability: localState.availability,
     attentionEvents: dedupeById([
       ...(remoteState.attentionEvents ?? []),
       ...(localState.attentionEvents ?? []),
@@ -3686,6 +3780,7 @@ async function handleCliEnrollment() {
         email: readCliValue(args, "--email"),
         displayName:
           readCliValue(args, "--display-name") ?? os.userInfo().username,
+        installIdentity: localServer.deviceIdentity(),
         hostname: os.hostname(),
         platform: os.platform(),
         osRelease: os.release(),
@@ -3764,7 +3859,10 @@ async function handleCliClientConfig() {
         mode: configuredMode,
         clientVersion: app.getVersion(),
         enrolledAt: new Date().toISOString(),
-        computer: { hostname: os.hostname() },
+        computer: {
+          id: localServer.deviceIdentity(),
+          hostname: os.hostname(),
+        },
       },
       null,
       2,
@@ -4408,6 +4506,7 @@ async function syncRemoteAgentInventory() {
         ...apiVersionHeaders("desktopEnroll"),
       },
       body: JSON.stringify({
+        installIdentity: localServer.deviceIdentity(),
         hostname: os.hostname(),
         platform: os.platform(),
         osRelease: os.release(),
@@ -4552,6 +4651,7 @@ async function postRemoteAgentInventory(
       ...apiVersionHeaders("desktopEnroll"),
     },
     body: JSON.stringify({
+      installIdentity: localServer.deviceIdentity(),
       hostname: os.hostname(),
       platform: os.platform(),
       osRelease: os.release(),
@@ -4608,6 +4708,7 @@ async function installProxyForMonitoredAgents(agents: string[]) {
     clientApiUrl: apiUrl,
     token,
     agents: agents.filter(isAutomaticProxyAgent),
+    failOpen: localServer.availabilityFailOpen,
   });
 }
 
@@ -6782,12 +6883,18 @@ async function configureLocalAgent() {
     `${JSON.stringify(
       {
         apiUrl,
-        token: localServer.effectiveToken,
+        // Agent hooks authenticate only to the loopback edge. The managed
+        // Cloud credential never leaves the desktop process or lands in an
+        // agent config file.
+        token: localServer.token,
         mode: localServer.clientMode,
         remoteApiUrl: localServer.remoteApiUrl,
         clientVersion: app.getVersion(),
         enrolledAt: new Date().toISOString(),
-        computer: { hostname: os.hostname() },
+        computer: {
+          id: localServer.deviceIdentity(),
+          hostname: os.hostname(),
+        },
       },
       null,
       2,
@@ -6802,6 +6909,7 @@ function localHookInstallContext() {
     clientVersion: app.getVersion(),
     apiFunction: "localHookEvaluate",
     apiVersion: "2026-05-22.local-hook-evaluate.v1",
+    availabilityFailOpen: localServer.availabilityFailOpen,
   };
 }
 
@@ -6862,15 +6970,16 @@ function canOpenAgent(kind?: string) {
 }
 
 function hookInstallContext() {
-  const managed = Boolean(localServer.remoteApiUrl);
   return {
-    apiUrl: localServer.remoteApiUrl || apiUrl,
-    token: localServer.effectiveToken,
+    // Keep agent integrations pointed at the stable desktop edge. The edge
+    // owns Cloud forwarding and availability classification, so an outage or
+    // recovery never requires rewriting hooks or restarting an IDE.
+    apiUrl,
+    token: localServer.token,
     clientVersion: app.getVersion(),
-    apiFunction: managed ? "tenantHookEvaluate" : "localHookEvaluate",
-    apiVersion: managed
-      ? "2026-05-22.tenant-hook-evaluate.v1"
-      : "2026-05-22.local-hook-evaluate.v1",
+    apiFunction: "localHookEvaluate",
+    apiVersion: "2026-05-22.local-hook-evaluate.v1",
+    availabilityFailOpen: localServer.availabilityFailOpen,
   };
 }
 
@@ -7315,29 +7424,91 @@ esac
 async function handleDesktopAuthCallback(rawUrl: string) {
   try {
     const callback = new URL(rawUrl);
-    if (callback.protocol !== "openleash:" || callback.hostname !== "auth")
+    if (
+      callback.protocol !== "openleash:" ||
+      callback.hostname !== "auth" ||
+      callback.pathname !== "/callback"
+    )
       return;
-    const dashboardToken =
-      callback.searchParams.get("dashboard_token") ||
-      callback.searchParams.get("token");
-    const enrollmentToken = callback.searchParams.get("enrollment_token");
-    if (dashboardToken || enrollmentToken) {
-      const apiUrl = normalizeRemoteApiUrl(
-        callback.searchParams.get("api_url") || cloudApiUrl,
+    if (
+      callback.searchParams.has("dashboard_token") ||
+      callback.searchParams.has("enrollment_token") ||
+      callback.searchParams.has("token")
+    ) {
+      notifyDesktopAuthFailure(
+        "Leash rejected an unsafe sign-in link. Start sign-in again from this app.",
       );
+      return;
+    }
+    const code = callback.searchParams.get("code");
+    const state = callback.searchParams.get("state") ?? "";
+    const pending = pendingDesktopAuth;
+    if (
+      !code ||
+      !pending ||
+      Date.now() - pending.createdAt > 10 * 60 * 1000 ||
+      !secureDesktopValueEquals(state, pending.state)
+    ) {
+      notifyDesktopAuthFailure(
+        "This sign-in request expired, was already used, or was not started by this Leash app.",
+      );
+      return;
+    }
+    // Consume local state before any network exchange. A duplicate custom URL
+    // event can never race the first callback into a second credential.
+    pendingDesktopAuth = undefined;
+    const providerError =
+      callback.searchParams.get("error_description") ||
+      callback.searchParams.get("error");
+    if (providerError) {
+      notifyDesktopAuthFailure(providerError);
+      return;
+    }
+    if (pending.kind === "dashboard_handoff") {
+      if (!pending.codeVerifier || !/^olh_[A-Za-z0-9_-]{43}$/.test(code)) {
+        notifyDesktopAuthFailure("Leash did not receive a valid Desktop handoff.");
+        return;
+      }
+      const callbackApiUrl = normalizeRemoteApiUrl(
+        callback.searchParams.get("api_url") || pending.apiUrl,
+      );
+      if (callbackApiUrl !== normalizeRemoteApiUrl(pending.apiUrl)) {
+        notifyDesktopAuthFailure("Leash rejected a handoff from an unexpected API.");
+        return;
+      }
+      const handoffResponse = await fetch(
+        new URL("/v1/mobile/auth/handoff/exchange", pending.apiUrl),
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...apiVersionHeaders("mobileAuthExchange"),
+          },
+          body: JSON.stringify({
+            code,
+            state,
+            codeVerifier: pending.codeVerifier,
+          }),
+        },
+      );
+      const handoffBody = await handoffResponse.json().catch(() => ({}));
+      if (!handoffResponse.ok || !handoffBody.desktopEnrollmentToken) {
+        notifyDesktopAuthFailure(
+          handoffBody.error ||
+            handoffBody.message ||
+            "Leash could not finish the Desktop handoff.",
+        );
+        return;
+      }
       desktopAuthSession = {
-        token: enrollmentToken || dashboardToken!,
-        apiUrl,
-        expiresAt: callback.searchParams.get("expires_at") || undefined,
-        organizationName:
-          callback.searchParams.get("organization_name") || undefined,
-        organizationSlug:
-          callback.searchParams.get("organization_slug") || undefined,
-        userName: callback.searchParams.get("user_name") || undefined,
-        userEmail: callback.searchParams.get("user_email") || undefined,
-        billing: dashboardToken
-          ? await fetchCloudBilling(apiUrl, dashboardToken)
-          : undefined,
+        token: handoffBody.desktopEnrollmentToken,
+        apiUrl: pending.apiUrl,
+        organizationName: handoffBody.organization?.name,
+        organizationSlug: handoffBody.organization?.slug,
+        userName: handoffBody.user?.display_name || handoffBody.user?.name,
+        userEmail: handoffBody.user?.email,
+        account: handoffBody.account,
+        evaluationProvider: handoffBody.evaluationProvider,
       };
       presentCloudTrialStatus(desktopAuthSession.billing);
       restoreMainWindow();
@@ -7347,16 +7518,8 @@ async function handleDesktopAuthCallback(rawUrl: string) {
       });
       return;
     }
-    const code = callback.searchParams.get("code");
-    if (!code || !pendingDesktopAuth) {
-      window?.webContents.send("openleash:auth", {
-        ok: false,
-        error: "Sign-in did not return a usable authorization code.",
-      });
-      return;
-    }
     const response = await fetch(
-      new URL("/v1/mobile/auth/exchange", pendingDesktopAuth.apiUrl),
+      new URL("/v1/mobile/auth/exchange", pending.apiUrl),
       {
         method: "POST",
         headers: {
@@ -7365,12 +7528,14 @@ async function handleDesktopAuthCallback(rawUrl: string) {
         },
         body: JSON.stringify({
           redirectUri:
-            pendingDesktopAuth.exchangeRedirectUri || desktopRedirectUri,
+            pending.exchangeRedirectUri || desktopRedirectUri,
           authorizationCode: code,
-          providerType: pendingDesktopAuth.providerType,
-          organizationId: pendingDesktopAuth.organizationId,
-          organizationSlug: pendingDesktopAuth.organizationSlug,
-          audience: pendingDesktopAuth.audience ?? "individual",
+          state,
+          codeVerifier: pending.codeVerifier,
+          providerType: pending.providerType,
+          organizationId: pending.organizationId,
+          organizationSlug: pending.organizationSlug,
+          audience: pending.audience ?? "individual",
           desktopEnrollment: true,
         }),
       },
@@ -7403,14 +7568,14 @@ async function handleDesktopAuthCallback(rawUrl: string) {
         : undefined;
     desktopAuthSession = {
       token: issuedEnrollmentToken || token,
-      apiUrl: pendingDesktopAuth.apiUrl,
+      apiUrl: pending.apiUrl,
       expiresAt: body.tokens?.expiresAt,
       organizationName:
         body.organization?.name || body.session?.organization?.name,
       organizationSlug:
         body.organization?.slug ||
         body.session?.organization?.slug ||
-        pendingDesktopAuth.organizationSlug,
+        pending.organizationSlug,
       userName:
         body.user?.display_name ||
         body.user?.name ||
@@ -7419,10 +7584,9 @@ async function handleDesktopAuthCallback(rawUrl: string) {
       userEmail: body.user?.email || body.session?.user?.email,
       account: body.account || body.session?.account,
       evaluationProvider: body.evaluationProvider || body.session?.evaluationProvider,
-      billing: await fetchCloudBilling(pendingDesktopAuth.apiUrl, token),
+      billing: await fetchCloudBilling(pending.apiUrl, token),
     };
     presentCloudTrialStatus(desktopAuthSession.billing);
-    pendingDesktopAuth = undefined;
     restoreMainWindow();
     window?.webContents.send("openleash:auth", {
       ok: true,
@@ -7434,6 +7598,18 @@ async function handleDesktopAuthCallback(rawUrl: string) {
       error: "Leash could not process the sign-in callback.",
     });
   }
+}
+
+function secureDesktopValueEquals(provided: string, expected: string) {
+  if (!provided || !expected) return false;
+  const left = crypto.createHash("sha256").update(provided).digest();
+  const right = crypto.createHash("sha256").update(expected).digest();
+  return crypto.timingSafeEqual(left, right);
+}
+
+function notifyDesktopAuthFailure(error: string) {
+  restoreMainWindow();
+  window?.webContents.send("openleash:auth", { ok: false, error });
 }
 
 async function fetchCloudBilling(apiUrl: string, token: string) {

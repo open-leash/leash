@@ -1284,6 +1284,9 @@ export type MobileAuthStartRequest = {
     organizationId?: string;
     providerType?: MobileIdentityProvider["type"];
     redirectUri: string;
+    /** RFC 7636 challenge binding a custom-scheme callback to this app instance. */
+    codeChallenge?: string;
+    codeChallengeMethod?: "S256";
 };
 export type MobileAuthStartResponse = {
     authorizationUrl: string;
@@ -1297,6 +1300,10 @@ export type MobileAuthExchangeRequest = {
     organizationSlug?: string;
     providerType: MobileIdentityProvider["type"];
     authorizationCode?: string;
+    /** Opaque, single-use state returned by the matching auth start request. */
+    state?: string;
+    /** RFC 7636 verifier matching the challenge supplied when sign-in started. */
+    codeVerifier?: string;
     idToken?: string;
     redirectUri: string;
     provisionUser?: boolean;

@@ -796,7 +796,7 @@ values ('', 'openleash', null, false, 1, null)
 on conflict (slug) do nothing;
 
 insert into users (email, display_name, role, token_hash)
-values ('max.brin@openleash.local', 'Max Brin', 'owner', encode(digest(coalesce(current_setting('openleash.dev_token', true), 'dev-' || gen_random_uuid()::text), 'sha256'), 'hex'))
+values ('dev-user@openleash.local', 'Local developer', 'owner', encode(digest(coalesce(current_setting('openleash.dev_token', true), 'dev-' || gen_random_uuid()::text), 'sha256'), 'hex'))
 on conflict (email) do nothing;
 
 update users set organization_id = (select id from organizations where slug = 'openleash' limit 1)

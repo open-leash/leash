@@ -82,6 +82,7 @@ export async function installLocalProxy(options: {
   token: string;
   agents?: string[];
   corporateProxy?: string;
+  failOpen?: boolean;
 }) {
   const binary = findLocalProxyBinary();
   if (!binary)
@@ -96,18 +97,7 @@ export async function installLocalProxy(options: {
   removeLegacyProxyContainer();
   fs.mkdirSync(PROXY_STATE_DIR, { recursive: true, mode: 0o700 });
   const log = fs.openSync(PROXY_LOG_FILE, "a", 0o600);
-  const env = {
-    ...process.env,
-    OPENLEASH_PROXY_LISTEN: "127.0.0.1:9320",
-    OPENLEASH_CLIENT_API: options.clientApiUrl.replace(/\/$/, ""),
-    OPENLEASH_TOKEN: options.token,
-    OPENLEASH_ANTHROPIC_UPSTREAM: "https://api.anthropic.com",
-    OPENLEASH_OPENAI_UPSTREAM: "https://api.openai.com",
-    OPENLEASH_CHATGPT_UPSTREAM: "https://chatgpt.com/backend-api/codex",
-    ...(options.corporateProxy?.trim()
-      ? { OPENLEASH_CORPORATE_PROXY: options.corporateProxy.trim() }
-      : {}),
-  };
+  const env = localProxyEnvironment(options);
   const child = spawn(binary, [], {
     detached: true,
     env,
@@ -121,6 +111,34 @@ export async function installLocalProxy(options: {
   await waitForHealthyProxy();
   for (const agent of agents) configureAgentProxy(agent, true);
   return localProxyStatus();
+}
+
+export function localProxyEnvironment(
+  options: {
+    clientApiUrl: string;
+    token: string;
+    corporateProxy?: string;
+    failOpen?: boolean;
+  },
+  base: NodeJS.ProcessEnv = process.env,
+) {
+  return {
+    ...base,
+    OPENLEASH_PROXY_LISTEN: "127.0.0.1:9320",
+    OPENLEASH_CLIENT_API: options.clientApiUrl.replace(/\/$/, ""),
+    OPENLEASH_TOKEN: options.token,
+    // The desktop edge classifies Cloud failures. This final native fallback
+    // keeps providers reachable if the desktop edge itself disappears, while
+    // the proxy still enforces every valid allow/deny response and non-retryable
+    // 4xx error.
+    OPENLEASH_PROXY_FAIL_OPEN: options.failOpen === true ? "true" : "false",
+    OPENLEASH_ANTHROPIC_UPSTREAM: "https://api.anthropic.com",
+    OPENLEASH_OPENAI_UPSTREAM: "https://api.openai.com",
+    OPENLEASH_CHATGPT_UPSTREAM: "https://chatgpt.com/backend-api/codex",
+    ...(options.corporateProxy?.trim()
+      ? { OPENLEASH_CORPORATE_PROXY: options.corporateProxy.trim() }
+      : {}),
+  };
 }
 
 export async function uninstallLocalProxy() {

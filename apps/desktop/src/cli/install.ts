@@ -7,7 +7,7 @@ import {
   probeCodexHooks,
 } from "../codex-config.js";
 import { apiVersionHeaders } from "./api-contract.js";
-import { hookApiUrl, readConfig } from "./config.js";
+import { availabilityFailOpen, hookApiUrl, readConfig } from "./config.js";
 import {
   claudeSettingsPath,
   codexConfigPath,
@@ -27,9 +27,16 @@ type HookAgent = "claude" | "codex" | "copilot" | "cursor" | "gemini" | "opencod
 type HookEventName = "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop";
 
 async function hookCommand(agent: HookAgent, event: HookEventName) {
+  const { config, args } = await localHookCurlArgs(agent, event);
+  const failOpen = availabilityFailOpen(config)
+    ? '; if [ "$hook_status" -eq 7 ] || [ "$hook_status" -eq 28 ]; then exit 0; fi'
+    : "";
+  return `curl ${args.map(shellQuote).join(" ")}; hook_status=$?${failOpen}; exit "$hook_status"`;
+}
+
+async function localHookCurlArgs(agent: HookAgent, event: HookEventName) {
   const config = await readConfig();
   const endpoint = new URL(`/v1/hooks/${agent}/${event}`, hookApiUrl(config));
-  endpoint.searchParams.set("user_token", config.token);
   endpoint.searchParams.set("hostname", config.computer?.hostname ?? os.hostname());
   endpoint.searchParams.set("platform", os.platform());
   endpoint.searchParams.set("os_release", os.release());
@@ -39,16 +46,22 @@ async function hookCommand(agent: HookAgent, event: HookEventName) {
   const args = [
     "-sS",
     "--fail-with-body",
+    "--connect-timeout",
+    "1",
+    "--max-time",
+    String(HOOK_TIMEOUT_SECONDS + 10),
     "-X",
     "POST",
     endpoint.toString(),
     "-H",
     "content-type: application/json",
+    "-H",
+    `authorization: Bearer ${config.token}`,
     ...headerArgs,
     "--data-binary",
     "@-"
   ];
-  return `curl ${args.map(shellQuote).join(" ")}`;
+  return { config, args };
 }
 
 export async function installClaudeHooks() {
@@ -447,27 +460,44 @@ function cursorHookKeys() {
 }
 
 async function openCodePluginSource() {
+  const config = await readConfig();
   const preToolUrl = await hookEndpoint("opencode", "PreToolUse");
   const postToolUrl = await hookEndpoint("opencode", "PostToolUse");
   const stopUrl = await hookEndpoint("opencode", "Stop");
   const headers = {
     "content-type": "application/json",
+    authorization: `Bearer ${config.token}`,
     ...apiVersionHeaders("localHookEvaluate")
   };
   return `const headers = ${JSON.stringify(headers, null, 2)};
 
 async function evaluate(url, payload) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      ...payload,
-      cwd: payload.cwd || process.cwd(),
-      session_id: payload.session_id || payload.sessionID || payload.session?.id
-    }),
-    signal: AbortSignal.timeout(${HOOK_TIMEOUT_MS})
+  const body = JSON.stringify({
+    ...payload,
+    cwd: payload.cwd || process.cwd(),
+    session_id: payload.session_id || payload.sessionID || payload.session?.id
   });
-  if (!response.ok) return;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(${HOOK_TIMEOUT_MS})
+    });
+  } catch (error) {
+    const code = error?.cause?.code || error?.code;
+    const transportUnavailable = ["AbortError", "TimeoutError"].includes(error?.name)
+      || [
+        "ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOENT", "ENETUNREACH",
+        "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT",
+        "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"
+      ].includes(code);
+    if (${availabilityFailOpen(config)} && transportUnavailable) return;
+    throw error;
+  }
+  if (!response.ok)
+    throw new Error(\`Leash desktop edge rejected this action (HTTP \${response.status}).\`);
   const decision = await response.json().catch(() => ({}));
   if (decision.decision === "deny" || decision.decision === "block") {
     throw new Error(decision.reason || "Leash denied this action.");
@@ -505,7 +535,6 @@ export const OpenLeash = async () => ({
 async function hookEndpoint(agent: HookAgent, event: HookEventName) {
   const config = await readConfig();
   const endpoint = new URL(`/v1/hooks/${agent}/${event}`, hookApiUrl(config));
-  endpoint.searchParams.set("user_token", config.token);
   endpoint.searchParams.set("hostname", config.computer?.hostname ?? os.hostname());
   endpoint.searchParams.set("platform", os.platform());
   endpoint.searchParams.set("os_release", os.release());
@@ -528,7 +557,8 @@ Runs OpenLeash local approval checks before risky OpenClaw messages or commands 
 }
 
 async function openClawHandlerSource() {
-  const curlArgs = await openClawCurlArgs();
+  const { config, args: curlArgs } = await localHookCurlArgs("openclaw", "UserPromptSubmit");
+  const failOpen = availabilityFailOpen(config);
   return `import { spawnSync } from "node:child_process";
 
 const handler = async (event) => {
@@ -545,6 +575,8 @@ const handler = async (event) => {
   });
   if (result.error || result.status !== 0) {
     event?.messages?.push?.("Leash could not evaluate this action.");
+    const availabilityFailure = [7, 28].includes(result.status) || result.error?.code === "ETIMEDOUT";
+    if (!(${failOpen} && availabilityFailure)) event.cancel = true;
     return;
   }
   try {
@@ -555,16 +587,12 @@ const handler = async (event) => {
     }
   } catch {
     if (result.stdout) event?.messages?.push?.(result.stdout);
+    event.cancel = true;
   }
 };
 
 export default handler;
 `;
-}
-
-async function openClawCurlArgs() {
-  const command = await hookCommand("openclaw", "UserPromptSubmit");
-  return command.match(/"[^"]+"|'[^']+'|\S+/g)?.slice(1).map((part) => part.replace(/^["']|["']$/g, "")) ?? [];
 }
 
 function isLocalPersonalApi(apiUrl: string) {

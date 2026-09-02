@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   configureAgentProxy,
   LOCAL_PROXY_URL,
+  localProxyEnvironment,
   localProxyBinaryCandidates,
 } from "./proxy-manager.js";
 import { hookApiUrl, proxyClientApiUrl } from "./cli/config.js";
@@ -36,13 +37,33 @@ test("released desktop resolves the bundled native proxy without Docker", () => 
   );
 });
 
-test("proxy traffic uses the desktop edge while hooks use the managed API", () => {
+test("proxy traffic and hooks use the availability-aware desktop edge", () => {
   const config = {
     apiUrl: "http://127.0.0.1:9317/",
     remoteApiUrl: "https://api.openleash.com/",
   };
   assert.equal(proxyClientApiUrl(config), "http://127.0.0.1:9317");
-  assert.equal(hookApiUrl(config), "https://api.openleash.com");
+  assert.equal(hookApiUrl(config), "http://127.0.0.1:9317");
+});
+
+test("only managed proxy installs enable the classified availability fallback", () => {
+  const env = localProxyEnvironment(
+    { clientApiUrl: "http://127.0.0.1:9317", token: "test" },
+    {},
+  );
+  assert.equal(env.OPENLEASH_PROXY_FAIL_OPEN, "false");
+  assert.equal(env.OPENLEASH_CLIENT_API, "http://127.0.0.1:9317");
+  assert.equal(
+    localProxyEnvironment(
+      {
+        clientApiUrl: "http://127.0.0.1:9317",
+        token: "test",
+        failOpen: true,
+      },
+      {},
+    ).OPENLEASH_PROXY_FAIL_OPEN,
+    "true",
+  );
 });
 
 test("Claude proxy configuration is reversible", () => {

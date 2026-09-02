@@ -45,14 +45,19 @@ owns layout, accessibility, truncation, animation, and safe navigation. Features
 cannot inject HTML, CSS, JavaScript, arbitrary URLs, shell commands, or custom
 Electron IPC.
 
-Installed hooks call the configured managed Leash API (the URL retains its
-OpenLeash compatibility hostname):
+Installed hooks always call the loopback Desktop edge:
 
 ```text
-https://api.openleash.com/v1/hooks/:agent/:event
+http://127.0.0.1:9317/v1/hooks/:agent/:event
 ```
 
-Personal Open Source installs use the locally running Leash Engine URL. The desktop local API still exists for setup, tray state, OAuth callbacks, local cache, local development, and compatibility relay behavior. If the configured Engine is unavailable, enforcement fails closed.
+For managed Cloud, the edge forwards the hook with the enrolled identity and
+keeps the installed command stable across outages and recovery. Transport
+errors, timeouts, HTTP 408/425, and server-side 5xx responses continue in a
+visible degraded mode. Valid policy denies, authentication/entitlement 4xx,
+and malformed policy responses remain enforced. If the Desktop edge itself is
+not listening, generated shell hooks stop trying after one second and continue;
+other local or HTTP failures are not silently converted to allows.
 
 ---
 
@@ -60,8 +65,8 @@ Personal Open Source installs use the locally running Leash Engine URL. The desk
 
 | Mode | Behavior |
 | --- | --- |
-| 🧑‍💻 Personal Open Source | Desktop uses the locally running public Leash Engine and Postgres; hooks target that local API. |
-| ☁️ Leash Cloud | Hooks target Leash-hosted cloud APIs; desktop receives personal state and approvals from Leash Cloud. |
+| 🧑‍💻 Personal Open Source | Desktop uses the locally running public Leash Engine and Postgres through its loopback edge. |
+| ☁️ Leash Cloud | Hooks target the loopback edge, which relays decisions and approvals to Leash Cloud. |
 
 ---
 
@@ -119,9 +124,13 @@ closed catalog of built-in Features; it does not download third-party code.
 
 ## 🪝 Hook philosophy
 
-- Hooks enter through the managed OpenLeash API so local and provider-cloud agent runs use the same URL.
+- Installed endpoint hooks enter through the stable desktop edge. The edge
+  forwards to Leash Cloud and automatically recovers without rewriting agent
+  configuration or requiring an IDE restart.
 - Install changes are explicit and reversible.
-- Backend outages fail closed with a clear reason.
+- Valid policy denials and authentication/entitlement errors fail closed.
+  Confirmed transport failures, timeouts, HTTP 408/425, and server-side 5xx
+  failures temporarily continue in visibly degraded mode.
 - Users should see what changed and how to undo it.
 - Risky actions should feel clear, not spooky.
 

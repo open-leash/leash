@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import crypto from "node:crypto";
 import { canonicalPluginSlug } from "../plugin-slug.js";
 import os from "node:os";
 import { apiVersionHeaders } from "./api-contract.js";
@@ -52,6 +53,7 @@ program
   .option("--email <email>", "User email")
   .option("--display-name <name>", "Display name")
   .action(async (options) => {
+    const installIdentity = crypto.randomUUID();
     await writeConfig({
       token: options.token,
       apiUrl: options.apiUrl,
@@ -60,7 +62,7 @@ program
       enrolledAt: new Date().toISOString(),
       clientVersion: "0.1.0",
       user: options.email || options.displayName ? { email: options.email, displayName: options.displayName } : undefined,
-      computer: { hostname: os.hostname() }
+      computer: { id: installIdentity, hostname: os.hostname() }
     });
     console.log("Leash Client config saved.");
   });
@@ -75,6 +77,7 @@ program
   .option("--mode <mode>", "cloud or enterprise", "cloud")
   .action(async (options) => {
     const apiUrl = options.apiUrl ?? tenantToApiUrl(options.tenant);
+    const installIdentity = crypto.randomUUID();
     const response = await fetch(`${apiUrl}/v1/enroll`, {
       method: "POST",
       headers: { "content-type": "application/json", ...apiVersionHeaders("tenantEnroll") },
@@ -82,6 +85,7 @@ program
         deploymentToken: options.token,
         email: options.email,
         displayName: options.displayName ?? os.userInfo().username,
+        installIdentity,
         hostname: os.hostname(),
         platform: os.platform(),
         osRelease: os.release(),
@@ -103,7 +107,7 @@ program
       enrolledAt: new Date().toISOString(),
       clientVersion: "0.1.0",
       user: body.user ? { email: body.user.email, displayName: body.user.display_name } : undefined,
-      computer: body.computer
+      computer: { ...body.computer, id: installIdentity }
     });
     console.log(`Leash Client enrolled ${os.hostname()} with ${body.tenantUrl ?? options.tenant}.`);
   });
@@ -254,7 +258,8 @@ proxy.command("install")
         clientApiUrl: proxyClientApiUrl(config),
         token: config.token,
         agents: String(options.agents).split(",").map((item) => item.trim()).filter(Boolean),
-        corporateProxy: options.corporateProxy
+        corporateProxy: options.corporateProxy,
+        failOpen: Boolean(config.remoteApiUrl),
       });
       console.table(status);
     } catch (error) {
