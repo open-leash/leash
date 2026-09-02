@@ -145,6 +145,8 @@ jobs:
           xcrun stapler validate "$app_path"
           xcrun stapler validate "$dmg_path"
           hdiutil verify "$dmg_path"
+          printf 'codesign, Gatekeeper, notarization staple, and DMG integrity verified by workflow %s\n' "$GITHUB_RUN_ID" \
+            > release/macos/MACOS-NOTARIZATION-VERIFIED
 
       - name: Smoke-test fresh install and running-app upgrade
         working-directory: apps/desktop
@@ -174,6 +176,7 @@ jobs:
             apps/desktop/release/macos/latest-mac.yml
             apps/desktop/release/macos/install-openleash-personal.sh
             apps/desktop/release/macos/SHA256SUMS
+            apps/desktop/release/macos/MACOS-NOTARIZATION-VERIFIED
 
       - name: Attach immutable assets to GitHub release
         if: startsWith(github.ref, 'refs/tags/')
@@ -181,4 +184,4 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" release/macos/*.dmg release/macos/*.blockmap release/macos/latest-mac.yml release/macos/install-openleash-personal.sh release/macos/SHA256SUMS --clobber
+        run: gh release upload "${{ github.ref_name }}" release/macos/*.dmg release/macos/*.blockmap release/macos/latest-mac.yml release/macos/install-openleash-personal.sh release/macos/SHA256SUMS release/macos/MACOS-NOTARIZATION-VERIFIED --clobber
