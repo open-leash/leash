@@ -551,6 +551,8 @@ let pendingDesktopAuth:
 let desktopAuthSession:
   | {
       token: string;
+      enrollmentFallbackToken?: string;
+      enrolled?: boolean;
       apiUrl: string;
       expiresAt?: string;
       organizationName?: string;
@@ -562,6 +564,14 @@ let desktopAuthSession:
       billing?: Record<string, unknown>;
     }
   | undefined;
+
+function rendererDesktopAuthSession() {
+  if (!desktopAuthSession) return {};
+  const payload = { ...desktopAuthSession };
+  delete payload.enrollmentFallbackToken;
+  delete payload.enrolled;
+  return payload;
+}
 let selfHostedRuntime = {
   dockerInstalled: false,
   dockerRunning: false,
@@ -812,6 +822,7 @@ if (singleInstanceLock) app
       onAgentStop: handleLocalAgentStop,
       onRemoteHookForward: refreshPendingApprovalsSoon,
       onAgentActivity: handleImmediateAgentActivity,
+      onDesktopAuthCallback: handleDesktopAuthCallback,
     });
     startupLog(`local server constructed at ${app.getPath("userData")}`);
     const protectedAgentsToRestore = shouldPreserveSettingsForLaunch()
@@ -1334,6 +1345,7 @@ async function enrollDesktopEndpoint(
   remoteApiUrl: string,
   dashboardToken: string,
   agents: string[] = [],
+  fallbackToken?: string,
 ): Promise<
   | {
       ok: true;
@@ -1343,26 +1355,48 @@ async function enrollDesktopEndpoint(
   | { ok: false; error: string }
 > {
   try {
-    const response = await fetch(new URL("/v1/desktop/enroll", remoteApiUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${dashboardToken}`,
-        ...apiVersionHeaders("desktopEnroll"),
-      },
-      body: JSON.stringify({
-        installIdentity: localServer.deviceIdentity(),
-        hostname: os.hostname(),
-        platform: os.platform(),
-        osRelease: os.release(),
-        clientVersion: app.getVersion(),
-        agents: enrollmentAgents(agents),
-      }),
-      signal: AbortSignal.timeout(
-        Number(process.env.OPENLEASH_DESKTOP_ENROLL_TIMEOUT_MS ?? 15000),
-      ),
+    const enrollmentBody = JSON.stringify({
+      installIdentity: localServer.deviceIdentity(),
+      hostname: os.hostname(),
+      platform: os.platform(),
+      osRelease: os.release(),
+      clientVersion: app.getVersion(),
+      agents: enrollmentAgents(agents),
     });
-    const body = await response.json().catch(() => ({}));
+    const enroll = async (
+      token: string,
+      credential: "primary" | "dashboard-fallback",
+    ) => {
+      const response = await fetch(new URL("/v1/desktop/enroll", remoteApiUrl), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+          ...apiVersionHeaders("desktopEnroll"),
+        },
+        body: enrollmentBody,
+        signal: AbortSignal.timeout(
+          Number(process.env.OPENLEASH_DESKTOP_ENROLL_TIMEOUT_MS ?? 15000),
+        ),
+      });
+      const tokenClass = token.startsWith("ole_")
+        ? "desktop-enrollment"
+        : token.startsWith("ols_")
+          ? "dashboard-session"
+          : "other";
+      startupLog(
+        `desktop enrollment ${credential} (${tokenClass}) returned ${response.status} from ${new URL(remoteApiUrl).origin}`,
+      );
+      return { response, body: await response.json().catch(() => ({})) };
+    };
+    let { response, body } = await enroll(dashboardToken, "primary");
+    if (
+      response.status === 401 &&
+      fallbackToken &&
+      fallbackToken !== dashboardToken
+    ) {
+      ({ response, body } = await enroll(fallbackToken, "dashboard-fallback"));
+    }
     if (!response.ok || !body.token) {
       return {
         ok: false,
@@ -1383,6 +1417,56 @@ async function enrollDesktopEndpoint(
       ),
     };
   }
+}
+
+async function savePluginSettingsEndpoint(
+  remoteApiUrl: string,
+  token: string,
+  payload: {
+    pluginId?: string;
+    enabled?: boolean;
+    config?: Record<string, unknown>;
+    profiles?: Array<{
+      id: string;
+      name: string;
+      agentKinds: string[];
+      agentIds?: string[];
+      projectPaths?: string[];
+      enabled?: boolean;
+      config: Record<string, unknown>;
+      priority?: number;
+    }>;
+    orderingPriority?: number | null;
+    marketplace?: PublicPluginListing;
+  },
+) {
+  const pluginId = String(payload.pluginId ?? "").trim();
+  if (!pluginId) return { ok: false as const, error: "Plugin id is required." };
+  const response = await fetch(
+    new URL(`/v1/plugins/${encodeURIComponent(pluginId)}/settings`, remoteApiUrl),
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        enabled: payload.enabled !== false,
+        ...(payload.config !== undefined ? { config: payload.config } : {}),
+        profiles: payload.profiles ?? undefined,
+        orderingPriority: payload.orderingPriority ?? undefined,
+        marketplace: payload.marketplace ?? undefined,
+      }),
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return {
+      ok: false as const,
+      error: body.error || "Could not save plugin settings.",
+    };
+  }
+  return { ok: true as const, ...body };
 }
 
 function enrollmentAgents(agentKinds: string[]) {
@@ -1525,41 +1609,13 @@ ipcMain.handle(
       payload.token || localServer.effectiveToken || desktopAuthSession?.token;
     if (!token)
       return { ok: false, error: "Sign in before saving plugin settings." };
-    const pluginId = String(payload.pluginId ?? "").trim();
-    if (!pluginId) return { ok: false, error: "Plugin id is required." };
     const remoteApiUrl = normalizeRemoteApiUrl(
       payload.apiUrl ||
         localServer.remoteApiUrl ||
         desktopAuthSession?.apiUrl ||
         cloudApiUrl,
     );
-    const response = await fetch(
-      new URL(
-        `/v1/plugins/${encodeURIComponent(pluginId)}/settings`,
-        remoteApiUrl,
-      ),
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          enabled: payload.enabled !== false,
-          ...(payload.config !== undefined ? { config: payload.config } : {}),
-          profiles: payload.profiles ?? undefined,
-          orderingPriority: payload.orderingPriority ?? undefined,
-          marketplace: payload.marketplace ?? undefined,
-        }),
-      },
-    );
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok)
-      return {
-        ok: false,
-        error: body.error || "Could not save plugin settings.",
-      };
-    return { ok: true, ...body };
+    return savePluginSettingsEndpoint(remoteApiUrl, token, payload);
   },
 );
 ipcMain.handle("openleash:import-local-plugin-folder", async () => {
@@ -1678,6 +1734,23 @@ ipcMain.handle(
       remoteToken?: string;
       remoteOrganization?: string;
       remoteUser?: string;
+      pluginSettings?: Array<{
+        pluginId?: string;
+        enabled?: boolean;
+        config?: Record<string, unknown>;
+        profiles?: Array<{
+          id: string;
+          name: string;
+          agentKinds: string[];
+          agentIds?: string[];
+          projectPaths?: string[];
+          enabled?: boolean;
+          config: Record<string, unknown>;
+          priority?: number;
+        }>;
+        orderingPriority?: number | null;
+        marketplace?: PublicPluginListing;
+      }>;
       skipDashboardOpen?: boolean;
       islandVisibility?: "always" | "activity" | "notifications" | "off";
     },
@@ -1719,7 +1792,11 @@ ipcMain.handle(
       payload.remoteUser ||
       desktopAuthSession?.userName ||
       desktopAuthSession?.userEmail;
-    if (desktopAuthSession?.token && remoteToken === desktopAuthSession.token) {
+    if (
+      desktopAuthSession?.token &&
+      remoteToken === desktopAuthSession.token &&
+      !desktopAuthSession.enrolled
+    ) {
       sendSetupProgress({
         percent: 24,
         stage: "connect",
@@ -1731,13 +1808,25 @@ ipcMain.handle(
         remoteApiUrl,
         desktopAuthSession.token,
         payload.agents ?? [],
+        desktopAuthSession.enrollmentFallbackToken,
       );
       if (!enrollment.ok) return { ok: false, error: enrollment.error };
       remoteToken = enrollment.token;
+      desktopAuthSession.token = enrollment.token;
+      desktopAuthSession.enrollmentFallbackToken = undefined;
+      desktopAuthSession.enrolled = true;
       enrolledRemoteUser =
         enrollment.user?.display_name ||
         enrollment.user?.email ||
         enrolledRemoteUser;
+    }
+    for (const pluginSettings of payload.pluginSettings ?? []) {
+      const saved = await savePluginSettingsEndpoint(
+        remoteApiUrl,
+        remoteToken,
+        pluginSettings,
+      );
+      if (!saved.ok) return saved;
     }
     sendSetupProgress({
       percent: 32,
@@ -7514,7 +7603,7 @@ async function handleDesktopAuthCallback(rawUrl: string) {
       restoreMainWindow();
       window?.webContents.send("openleash:auth", {
         ok: true,
-        ...desktopAuthSession,
+        ...rendererDesktopAuthSession(),
       });
       return;
     }
@@ -7568,6 +7657,7 @@ async function handleDesktopAuthCallback(rawUrl: string) {
         : undefined;
     desktopAuthSession = {
       token: issuedEnrollmentToken || token,
+      enrollmentFallbackToken: issuedEnrollmentToken ? token : undefined,
       apiUrl: pending.apiUrl,
       expiresAt: body.tokens?.expiresAt,
       organizationName:
@@ -7590,7 +7680,7 @@ async function handleDesktopAuthCallback(rawUrl: string) {
     restoreMainWindow();
     window?.webContents.send("openleash:auth", {
       ok: true,
-      ...desktopAuthSession,
+      ...rendererDesktopAuthSession(),
     });
   } catch (error) {
     window?.webContents.send("openleash:auth", {

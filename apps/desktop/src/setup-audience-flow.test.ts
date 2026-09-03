@@ -67,10 +67,50 @@ test("Business sign-in uses a restricted grant while preserving normal endpoint 
   assert.match(desktopMain, /callback\.searchParams\.get\("code"\)/);
   assert.match(desktopMain, /codeVerifier: pending\.codeVerifier/);
   assert.match(desktopMain, /token: handoffBody\.desktopEnrollmentToken/);
-  assert.match(desktopMain, /desktopAuthSession\?\.token && remoteToken === desktopAuthSession\.token/);
+  assert.match(desktopMain, /desktopAuthSession\?\.token &&\s+remoteToken === desktopAuthSession\.token/);
   assert.match(desktopMain, /body\.desktopEnrollmentToken/);
+  assert.match(desktopMain, /enrollmentFallbackToken: issuedEnrollmentToken \? token : undefined/);
+  assert.match(desktopMain, /delete payload\.enrollmentFallbackToken/);
+  assert.match(desktopMain, /delete payload\.enrolled/);
+  assert.match(desktopMain, /\.\.\.rendererDesktopAuthSession\(\)/);
+  assert.match(desktopMain, /response\.status === 401/);
+  assert.match(desktopMain, /await enroll\(fallbackToken, "dashboard-fallback"\)/);
+  assert.match(desktopMain, /desktop enrollment \$\{credential\} \(\$\{tokenClass\}\) returned \$\{response\.status\}/);
+  assert.match(desktopMain, /token\.startsWith\("ole_"\)/);
+  assert.match(desktopMain, /token\.startsWith\("ols_"\)/);
   assert.match(desktopMain, /desktopEnrollment: true/);
   assert.doesNotMatch(desktopMain, /callback\.searchParams\.get\("enrollment_token"\)/);
+});
+
+test("setup enrolls before saving selected Feature settings", () => {
+  const setupStart = desktopMain.indexOf('"openleash:setup"');
+  const setupHandler = desktopMain.slice(
+    setupStart,
+    desktopMain.indexOf('ipcMain.handle(', setupStart + 1),
+  );
+  assert.ok(
+    setupHandler.indexOf("enrollDesktopEndpoint(") <
+      setupHandler.indexOf("savePluginSettingsEndpoint("),
+  );
+  assert.match(setupHandler, /desktopAuthSession\.token = enrollment\.token/);
+  assert.match(setupHandler, /desktopAuthSession\.enrolled = true/);
+  assert.match(html, /pluginSettings: selectedPluginSettingsPayloads\(\)/);
+  const finishSetup = html.slice(
+    html.indexOf("async function finishSetup"),
+    html.indexOf("function welcomeAgentSprites"),
+  );
+  assert.doesNotMatch(finishSetup, /await saveSelectedPluginSettings\(\)/);
+});
+
+test("an invalid enrollment session returns setup to sign-in", () => {
+  const retryHandler = html.slice(
+    html.indexOf('const retryButton = document.getElementById("retryInstall")'),
+    html.indexOf("function renderSetup()"),
+  );
+  assert.match(retryHandler, /invalid OpenLeash session/);
+  assert.match(retryHandler, /Your sign-in expired\. Sign in again to continue\./);
+  assert.match(retryHandler, /setupRemoteAuth = undefined/);
+  assert.match(retryHandler, /setupStep = 3/);
 });
 
 test("every legacy Desktop OAuth callback is PKCE-bound before it reaches the custom URL scheme", () => {

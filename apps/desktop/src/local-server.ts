@@ -299,6 +299,7 @@ type LocalServerOptions = {
   onAgentStop?: (event: { agent: string; eventName: string; body: unknown }) => void;
   onRemoteHookForward?: (event: { agent: string; eventName: string; body: unknown }) => void;
   onAgentActivity?: (activity: LocalAgentActivity) => void;
+  onDesktopAuthCallback?: (callbackUrl: string) => void | Promise<void>;
   apiPort?: number;
   legacyAuthPort?: number;
 };
@@ -359,6 +360,29 @@ function desktopAuthReturnPage(callbackUrl: string) {
         window.close();
       }, 900);
     </script>
+  </body>
+</html>`;
+}
+
+function desktopAuthDirectReturnPage() {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign-in complete</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111827; background: #f8fafc; }
+      main { max-width: 460px; padding: 32px; text-align: center; }
+      h1 { margin: 0 0 10px; font-size: 24px; }
+      p { margin: 0; color: #64748b; line-height: 1.5; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Sign-in complete</h1>
+      <p>You can close this tab. Leash is continuing automatically.</p>
+    </main>
   </body>
 </html>`;
 }
@@ -1043,6 +1067,13 @@ export class LocalOpenLeashServer {
     }
     redirect.searchParams.set("exchangeRedirectUri", exchangeRedirectUri);
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (this.options.onDesktopAuthCallback) {
+      void Promise.resolve(
+        this.options.onDesktopAuthCallback(redirect.toString()),
+      ).catch(() => undefined);
+      res.end(desktopAuthDirectReturnPage());
+      return true;
+    }
     res.end(desktopAuthReturnPage(redirect.toString()));
     return true;
   }

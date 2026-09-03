@@ -698,7 +698,7 @@ app.post("/v1/enroll", async (req, res, next) => {
          user_id, hostname, platform, os_release, install_identity,
          enrollment_token_id, enrolled_at, last_seen_at
        ) values ($1, $2, $3, $4, $5, $6, now(), now())
-       on conflict (user_id, install_identity) where install_identity is not null do update set
+       on conflict (user_id, install_identity) where user_id is not null and install_identity is not null do update set
          hostname = excluded.hostname,
          platform = excluded.platform,
          os_release = excluded.os_release,
@@ -4195,7 +4195,7 @@ app.post("/v1/desktop/enroll", async (req, res, next) => {
     const computer = await client.query(
       `insert into computers (user_id, hostname, platform, os_release, install_identity, enrolled_at, last_seen_at)
        values ($1, $2, $3, $4, $5, now(), now())
-       on conflict (user_id, install_identity) where install_identity is not null do update set
+       on conflict (user_id, install_identity) where user_id is not null and install_identity is not null do update set
          hostname = excluded.hostname,
          platform = excluded.platform,
          os_release = excluded.os_release,
@@ -4297,7 +4297,7 @@ app.post("/v1/desktop/agents", async (req, res, next) => {
     const computer = await pool.query(
       `insert into computers (user_id, hostname, platform, os_release, install_identity, enrolled_at, last_seen_at)
        values ($1, $2, $3, $4, $5, now(), now())
-       on conflict (user_id, install_identity) where install_identity is not null do update set
+       on conflict (user_id, install_identity) where user_id is not null and install_identity is not null do update set
          hostname = excluded.hostname,
          platform = excluded.platform,
          os_release = excluded.os_release,

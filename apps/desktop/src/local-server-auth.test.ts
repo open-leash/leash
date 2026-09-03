@@ -60,3 +60,34 @@ test("the loopback control plane requires its per-install bearer and never expos
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test("the loopback OAuth return is consumed directly without an external-app prompt", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openleash-local-oauth-"));
+  let callbackUrl = "";
+  const server = new LocalOpenLeashServer(dataDir, {
+    apiPort: 0,
+    legacyAuthPort: 0,
+    onDesktopAuthCallback: (value) => {
+      callbackUrl = value;
+    },
+  });
+  await server.start();
+  try {
+    const response = await fetch(
+      new URL(
+        "/v1/auth/google/callback?code=oauth-code&state=oauth-state",
+        server.apiUrl,
+      ),
+    );
+    const body = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(callbackUrl, /^openleash:\/\/auth\/callback\?/);
+    assert.match(callbackUrl, /code=oauth-code/);
+    assert.match(callbackUrl, /state=oauth-state/);
+    assert.doesNotMatch(body, /openleash:\/\/auth\/callback/);
+    assert.match(body, /Leash is continuing automatically/);
+  } finally {
+    await server.stop();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

@@ -5,6 +5,10 @@ copyright: Copyright © 2026 Leash
 electronVersion: 43.3.0
 npmRebuild: false
 forceCodeSigning: false
+protocols:
+  - name: OpenLeash authentication callback
+    schemes:
+      - openleash
 extraMetadata:
   main: apps/desktop/dist/main.js
 directories:

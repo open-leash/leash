@@ -29,7 +29,10 @@ test("every desktop enrollment path uses a stable installation and per-device cr
   const inventory = source.slice(source.indexOf('app.post("/v1/desktop/agents"'), source.indexOf('app.post("/v1/agents/:kind/monitoring"'));
   for (const route of [tokenEnrollment, desktopEnrollment, inventory]) {
     assert.match(route, /installIdentity\.length < 16/);
-    assert.match(route, /on conflict \(user_id, install_identity\)/);
+    assert.match(
+      route,
+      /on conflict \(user_id, install_identity\) where user_id is not null and install_identity is not null/,
+    );
   }
   for (const route of [tokenEnrollment, desktopEnrollment]) {
     assert.match(route, /insert into desktop_credentials/);

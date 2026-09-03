@@ -14,6 +14,7 @@ const checks = [
 
 const contentChecks = [
   ["installer supports Personal Open Source", "scripts/install-openleash-personal.sh", /--open-source/],
+  ["desktop package registers the OpenLeash callback protocol", "electron-builder.personal.yml", /schemes:\s*\n\s*- openleash/],
   ["README supports Personal Open Source", "README.md", /Personal Open Source \(BYOK\)/],
   ["Features execute in process", "apps/engine/src/plugins/feature-runtime.ts", /BUILTIN_FEATURE_HANDLERS/],
   ["manifests declare built-in runtime", "packages/shared/src/index.ts", /runtime:\s*"builtin"/],

@@ -4312,6 +4312,17 @@
         };
         const retryButton = document.getElementById("retryInstall");
         if (retryButton) retryButton.onclick = () => {
+          if (/invalid OpenLeash session/i.test(setupFinishError || "")) {
+            setupRemoteAuth = undefined;
+            setupRemoteBusy = false;
+            setupRemoteNotice = "";
+            setupRemoteError = "Your sign-in expired. Sign in again to continue.";
+            setupInstallState = "idle";
+            setupStep = 3;
+            renderSetup();
+            scrollSetupTop();
+            return;
+          }
           setupInstallState = "idle";
           void finishSetup();
         };
@@ -4794,15 +4805,6 @@
         setupInstallProgress = { percent: 12, stage: "prepare", title: "Turning on every Feature", detail: "Activating every built-in protection and cost control..." };
         renderSetup();
         const agents = [...(selectedAgents || new Set())];
-        const pluginSave = await saveSelectedPluginSettings();
-        if (!pluginSave.ok) {
-          setupFinishing = false;
-          setupInstallState = "failed";
-          setupFinishError = pluginSave.error || "Could not save Feature settings.";
-          setupRemoteNotice = "";
-          renderSetup();
-          return;
-        }
         setupInstallProgress = { percent: 16, stage: "prepare", title: "Preparing this Mac", detail: "Connecting Leash to the selected agents..." };
         renderSetup();
         const rules = (state.rules || []).map((rule) => ({
@@ -4820,6 +4822,7 @@
           remoteToken: setupRemoteAuth?.token,
           remoteOrganization: setupRemoteAuth?.organizationName || setupRemoteAuth?.organizationSlug,
           remoteUser: setupRemoteAuth?.userName || setupRemoteAuth?.userEmail,
+          pluginSettings: selectedPluginSettingsPayloads(),
           skipDashboardOpen: setupSkipDashboardOpenAfterInstall,
           islandVisibility: setupIslandEnabled ? "always" : "off"
         }).catch((error) => ({ ok: false, error: error?.message || "Setup could not be completed." }));
