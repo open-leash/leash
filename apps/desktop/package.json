@@ -1,6 +1,6 @@
 {
   "name": "@openleash/desktop-client",
-  "version": "0.37.13",
+  "version": "0.37.14",
   "description": "Leash desktop agent policy and attention client.",
   "author": "Leash",
   "repository": {
