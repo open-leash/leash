@@ -27,7 +27,7 @@ test("the provider proxy authenticates to the loopback edge with only the local 
   assert.doesNotMatch(helperBlock, /localServer\.effectiveToken/);
 
   const ipcBlock = mainSource.match(
-    /"openleash:install-proxy",([\s\S]*?)\n  \},\n\);/,
+    /"openleash:install-proxy",([\s\S]*?)\r?\n  \},\r?\n\);/,
   )?.[1];
   assert.ok(ipcBlock, "install-proxy IPC handler is present");
   assert.match(ipcBlock, /const token = localServer\.token/);

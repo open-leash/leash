@@ -10,10 +10,12 @@ export function findDockerExecutable(options: {
 } = {}) {
   const platform = options.platform ?? process.platform;
   const home = options.home ?? os.homedir();
+  const delimiter = platform === "win32" ? ";" : ":";
+  const platformPath = platform === "win32" ? path.win32 : path.posix;
   const suffixes = platform === "win32" ? [".exe", ".cmd", ""] : [""];
   const directories = [
-    ...(options.envPath ?? process.env.PATH ?? "").split(path.delimiter),
-    path.join(home, ".local", "bin"),
+    ...(options.envPath ?? process.env.PATH ?? "").split(delimiter),
+    platformPath.join(home, ".local", "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
@@ -33,7 +35,7 @@ export function findDockerExecutable(options: {
 
   for (const directory of [...new Set(directories)]) {
     for (const suffix of suffixes) {
-      const candidate = path.join(directory, `docker${suffix}`);
+      const candidate = platformPath.join(directory, `docker${suffix}`);
       if (isExecutable(candidate)) return candidate;
     }
   }
