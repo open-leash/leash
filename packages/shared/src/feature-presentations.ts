@@ -13,7 +13,7 @@ export const LEASH_FEATURE_PRESENTATIONS = {
     "id": "openleash.blast-radius",
     "slug": "blast-radius",
     "name": "Destructive Protection",
-    "description": "Stops AI before it deletes files, damages your database, or breaks your project.",
+    "description": "Stops AI before it recursively deletes folders, wipes databases, or makes other broad destructive changes.",
     "category": "protection",
     "iconText": "💥",
     "showcaseOrder": 1

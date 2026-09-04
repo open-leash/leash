@@ -437,7 +437,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
     id: string;
     slug: string;
     name: "Destructive Protection";
-    description: "Stops AI before it deletes files, damages your database, or breaks your project.";
+    description: "Stops AI before it recursively deletes folders, wipes databases, or makes other broad destructive changes.";
     repositoryUrl: string;
     version: string;
     publisher: string;

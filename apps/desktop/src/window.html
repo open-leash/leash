@@ -4035,6 +4035,7 @@
       const pluginPendingRuleTexts = {};
       const skillDocScrollTops = new Map();
       const openDebugRowIds = new Set();
+      const openSettingsDisclosureIds = new Set();
       let debugSearch = "";
       let debugPluginFilter = "all";
       let debugEventFilter = "all";
@@ -6992,6 +6993,11 @@
       }
 
       function renderSettings() {
+        root.querySelectorAll("details.settingsDisclosure[id]").forEach((details) => {
+          details.open
+            ? openSettingsDisclosureIds.add(details.id)
+            : openSettingsDisclosureIds.delete(details.id);
+        });
         root.innerHTML = `
           <div class="settingsPage">
             <div class="head">
@@ -7056,7 +7062,7 @@
                 <div id="disconnectMessage" class="notice"></div>
               </section>
 
-              <details class="settingsDisclosure settingsSpan">
+              <details class="settingsDisclosure settingsSpan" id="proxyDisclosure" ${openSettingsDisclosureIds.has("proxyDisclosure") ? "open" : ""}>
                 <summary>
                   <div><span class="settingsEyebrow">Advanced</span><div class="settingsDisclosureTitle"><strong>Full conversation proxy</strong><span class="tag ${state.proxyStatus?.healthy ? "good" : state.proxyStatus?.running ? "warn" : ""}">${state.proxyStatus?.healthy ? "Active" : state.proxyStatus?.running ? "Starting" : "Off"}</span></div><p>Optional provider routing controls for prompts, responses, and tool traffic.</p></div>
                 </summary>
@@ -7073,7 +7079,7 @@
                 </div>
               </details>
 
-              <details class="settingsDisclosure settingsDanger settingsSpan">
+              <details class="settingsDisclosure settingsDanger settingsSpan" id="dangerDisclosure" ${openSettingsDisclosureIds.has("dangerDisclosure") ? "open" : ""}>
                 <summary><div><span class="settingsEyebrow">Danger zone</span><div class="settingsDisclosureTitle"><strong>Reset or uninstall Leash</strong></div><p>Destructive device actions stay folded away until you need them.</p></div></summary>
                 <div class="settingsDisclosureBody">
                   <div class="dangerGrid">
@@ -7087,6 +7093,13 @@
             <div class="settingsSaveBar"><button class="primary" id="saveSettings">Save preferences</button></div>
           </div>
         `;
+        root.querySelectorAll("details.settingsDisclosure[id]").forEach((details) => {
+          details.ontoggle = () => {
+            details.open
+              ? openSettingsDisclosureIds.add(details.id)
+              : openSettingsDisclosureIds.delete(details.id);
+          };
+        });
         document.getElementById("refreshProxy").onclick = async () => {
           state.proxyStatus = await window.openleash.proxyStatus();
           renderSettings();

@@ -198,9 +198,9 @@ export function activeAgentSessions(
       const lastActivityAt = session.last_activity_at ?? agent.activity_at;
       if (!lastActivityAt) return [];
       const sourceEvents = session.events ?? [];
-      if (sourceEvents.length === 0 && isBackgroundTitlePrompt(session.title)) return [];
+      if (sourceEvents.length === 0 && isBackgroundControlPrompt(agent.kind, session.title)) return [];
       const visibleEvents = sourceEvents.filter((event) =>
-        !isBackgroundTitlePrompt(event.prompt || session.title) &&
+        !isBackgroundControlPrompt(agent.kind, event.prompt || session.title) &&
         !isClaudeStatusPrompt(agent, {
           ...event,
           prompt: event.prompt || session.title,
@@ -350,15 +350,18 @@ function dedupeSessions(sessions: ActiveAgentSession[]) {
   const deduped: ActiveAgentSession[] = [];
   for (const session of sessions) {
     const duplicate = deduped.find((candidate) =>
-      candidate.agentKind === session.agentKind &&
-      (candidate.project === session.project || candidate.project === "Workspace" || session.project === "Workspace") &&
+      sameAgentSession(candidate, session) ||
       (
-        comparableTitle(candidate.title) === comparableTitle(session.title) ||
-        (candidate.project === "Workspace") !== (session.project === "Workspace") ||
-        candidate.title === "Agent working" ||
-        session.title === "Agent working"
-      ) &&
-      Math.abs(Date.parse(candidate.lastActivityAt) - Date.parse(session.lastActivityAt)) <= 2 * 60_000
+        candidate.agentKind === session.agentKind &&
+        (candidate.project === session.project || candidate.project === "Workspace" || session.project === "Workspace") &&
+        (
+          comparableTitle(candidate.title) === comparableTitle(session.title) ||
+          (candidate.project === "Workspace") !== (session.project === "Workspace") ||
+          candidate.title === "Agent working" ||
+          session.title === "Agent working"
+        ) &&
+        Math.abs(Date.parse(candidate.lastActivityAt) - Date.parse(session.lastActivityAt)) <= 2 * 60_000
+      )
     );
     if (!duplicate) {
       deduped.push(session);
@@ -492,15 +495,45 @@ function isInternalControlText(value: string) {
     /^you have \d+ weighted tokens left\b/i.test(value);
 }
 
-function isBackgroundTitlePrompt(value: unknown) {
+export function isBackgroundControlPrompt(agentKind: unknown, value: unknown) {
   if (typeof value !== "string") return false;
-  const normalized = value.toLowerCase();
-  return (
-    normalized.includes("you will be presented with a user prompt") &&
-    normalized.includes("provide a short title for a task that will be created from that prompt") &&
-    normalized.includes("generate a concise ui title") &&
-    normalized.includes("fill the structured title field with plain text")
-  );
+  const normalized = decodeTextEntities(value).replace(/\s+/g, " ").toLowerCase();
+  if (agentKind === "codex") {
+    const taskTitle =
+      normalized.includes("you will be presented with a user prompt") &&
+      normalized.includes("provide a short title for a task that will be created from that prompt") &&
+      normalized.includes("generate a concise ui title") &&
+      normalized.includes("fill the structured title field with plain text");
+    const projectSuggestions =
+      normalized.includes("generate 0 to 3 hyperpersonalized suggestions for what this user can do with codex") &&
+      normalized.includes("in this local project") &&
+      normalized.includes("get an understanding of the user's intent and goals");
+    const ambientSuggestionReview =
+      normalized.includes("you are an expert at upholding safety and compliance standards for codex ambient suggestions") &&
+      normalized.includes("# ambient suggestion candidates") &&
+      normalized.includes("suggestions to exclude") &&
+      normalized.includes("you must not output any other text");
+    return taskTitle || projectSuggestions || ambientSuggestionReview;
+  }
+  return agentKind === "claude-code" &&
+    normalized.includes("<session>") &&
+    normalized.includes("</session>") &&
+    normalized.includes("write the title in the predominant language of the session") &&
+    normalized.includes("ignore the language of the examples above");
+}
+
+export function isBackgroundControlPending(item: {
+  agent_kind?: unknown;
+  question?: unknown;
+  summary?: unknown;
+  quote?: unknown;
+  payload?: unknown;
+}) {
+  const candidates = [item.question, item.summary, item.quote];
+  if (item.payload !== undefined) {
+    try { candidates.push(JSON.stringify(item.payload)); } catch { /* non-serializable payload */ }
+  }
+  return candidates.some((value) => isBackgroundControlPrompt(item.agent_kind, value));
 }
 
 function isClaudeStatusPrompt(agent: ActivityIslandSourceAgent, event: ActivityIslandEvent) {
@@ -515,10 +548,36 @@ function humanize(value: string) {
 function cleanText(value: unknown) {
   if (typeof value !== "string") return "";
   const session = value.match(/<session(?:\s[^>]*)?>([\s\S]*?)<\/session>/i)?.[1];
-  return (session ?? value)
+  const cleaned = decodeTextEntities((session ?? value)
     .replace(/<\/?[a-z][^>]*>/gi, " ")
+  )
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 180);
+    .trim();
+  return collapseRepeatedText(cleaned).slice(0, 180);
+}
+
+function decodeTextEntities(value: string) {
+  return value
+    .replace(/&#(?:x([0-9a-f]+)|(\d+));?/gi, (match, hex: string | undefined, decimal: string | undefined) => {
+      const codePoint = Number.parseInt(hex ?? decimal ?? "", hex ? 16 : 10);
+      return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+        ? String.fromCodePoint(codePoint)
+        : match;
+    })
+    .replace(/&(nbsp|amp|lt|gt|quot|apos);/gi, (match, name: string) => ({
+      nbsp: " ",
+      amp: "&",
+      lt: "<",
+      gt: ">",
+      quot: "\"",
+      apos: "'",
+    })[name.toLowerCase()] ?? match);
+}
+
+function collapseRepeatedText(value: string) {
+  if (value.length < 16 || value.length % 2 !== 0) return value;
+  const midpoint = value.length / 2;
+  const first = value.slice(0, midpoint);
+  return first === value.slice(midpoint) ? first.trim() : value;
 }
 import type { PluginIslandContribution } from "@openleash/shared";

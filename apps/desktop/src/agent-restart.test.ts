@@ -3,6 +3,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   groupRunningAgentProcesses,
+  macRestartApplicationName,
   parseIdeProjects,
   parseRestartProcessTree,
 } from "./agent-restart";
@@ -26,6 +27,24 @@ test("groups Codex extension processes under one VS Code restart target", () => 
     processIds: [120, 130],
     projects: [{ name: "OL2", path: "/Users/max/Code/OL2" }, { name: "FileMesh" }],
   }]);
+});
+
+test("suggests restarting an already-open Codex desktop app", () => {
+  const processes = parseRestartProcessTree(`
+  300 1 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+  310 300 /Applications/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://
+  `);
+  assert.deepEqual(groupRunningAgentProcesses(processes, ["codex"]), [{
+    id: "application:codex",
+    application: "Codex",
+    applicationKind: "codex",
+    icon: "agent-icons/openai.svg",
+    agentKinds: ["codex"],
+    agentNames: ["OpenAI Codex"],
+    processIds: [300, 310],
+    projects: [],
+  }]);
+  assert.equal(macRestartApplicationName("codex", "Codex"), "ChatGPT");
 });
 
 test("keeps standalone terminal agents separate with their project path", () => {

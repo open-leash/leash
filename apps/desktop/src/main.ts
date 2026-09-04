@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { shouldResetLocalState } from "./install-state";
+import { findDockerExecutable } from "./docker-executable";
 import {
   agentIconFor,
   detectLocalAgentProtections,
@@ -72,6 +73,7 @@ import {
   applyCompletedAgentSessions,
   contributionsForSession,
   islandDisplayTargets,
+  isBackgroundControlPending,
   latestTokenSaverSavings,
   mergeImmediateAgentActivity,
   mergeRecoveredAgentSessions,
@@ -938,7 +940,7 @@ if (singleInstanceLock) app
     proxyStatus = await localProxyStatus();
     if (
       localServer.setupComplete &&
-      !proxyStatus.installed &&
+      !proxyStatus.running &&
       localServer.effectiveToken
     ) {
       try {
@@ -1640,7 +1642,10 @@ ipcMain.handle(
   "openleash:install-proxy",
   async (_event, payload: { agents?: string[]; corporateProxy?: string }) => {
     try {
-      const token = localServer.effectiveToken || desktopAuthSession?.token;
+      // The proxy talks to the loopback desktop edge, which authenticates
+      // exclusively with the per-install local token. The edge owns forwarding
+      // to Cloud with the separate account credential.
+      const token = localServer.token;
       if (!token)
         return {
           ok: false,
@@ -2317,7 +2322,7 @@ ipcMain.handle("openleash:uninstall-application", async () => {
 
   const runtimeDir = individualOpenSourceRuntimeDirectory();
   if (fs.existsSync(path.join(runtimeDir, "docker-compose.yml"))) {
-    const docker = spawnSync("docker", ["info"], {
+    const docker = spawnSync(findDockerExecutable(), ["info"], {
       encoding: "utf8",
       timeout: 8000,
     });
@@ -2716,8 +2721,17 @@ async function poll() {
     const billing = localServer.clientMode === "cloud" && localServer.remoteApiUrl && localServer.effectiveToken
       ? await fetchCloudBilling(localServer.remoteApiUrl, localServer.effectiveToken)
       : undefined;
-    applyRememberedApprovalChoices(body.pending);
-    latestPendingSources = body.pending.filter(
+    const backgroundControlApprovals = body.pending.filter(isBackgroundControlPending);
+    for (const item of backgroundControlApprovals) {
+      if (resolvingDecisionIds.has(item.id)) continue;
+      resolvingDecisionIds.add(item.id);
+      localServer.resolve(item.id, "deny", "Ignored private agent UI traffic.");
+      void syncRemoteDecision(item.id, "deny", "Ignored private agent UI traffic.")
+        .finally(() => resolvingDecisionIds.delete(item.id));
+    }
+    const userPending = body.pending.filter((item) => !isBackgroundControlPending(item));
+    applyRememberedApprovalChoices(userPending);
+    latestPendingSources = userPending.filter(
       (item) =>
         !resolvingDecisionIds.has(item.id) &&
         !suppressedNoticeKeys.has(decisionNoticeKey(item)),
@@ -4310,13 +4324,7 @@ function startCompleteMacUninstall(runtimeDir: string) {
   fs.closeSync(log);
   if (!child.pid) throw new Error("The uninstall helper did not start.");
   child.unref();
-  setTimeout(() => {
-    quitting = true;
-    noticeWindow?.destroy();
-    window?.destroy();
-    tray?.destroy();
-    app.quit();
-  }, 500);
+  setTimeout(quitOpenLeash, 100);
 }
 
 function readUpdateState(): UpdateState {
@@ -4791,7 +4799,9 @@ function isAutomaticProxyAgent(kind: string) {
 }
 
 async function installProxyForMonitoredAgents(agents: string[]) {
-  const token = localServer.effectiveToken || desktopAuthSession?.token;
+  // Never put the Cloud account token on the loopback proxy hop. The desktop
+  // edge validates its local token, then adds the Cloud credential upstream.
+  const token = localServer.token;
   if (!token) throw new Error("Leash backend token is unavailable.");
   return installLocalProxy({
     clientApiUrl: apiUrl,
@@ -5112,14 +5122,40 @@ function repoRootFor(projectPath: string) {
 }
 
 function findNestedSkillDirs(root: string) {
+  // Project-level skill directories are already checked directly above. A
+  // recursive walk is only useful for monorepos, and walking an arbitrary
+  // Documents/iCloud folder can synchronously block Electron while macOS
+  // materializes a File Provider directory.
+  const repositoryRoot = path.resolve(repoRootFor(root));
+  if (!fs.existsSync(path.join(repositoryRoot, ".git"))) return [];
+  const fileProviderRoots = [
+    path.join(os.homedir(), "Desktop"),
+    path.join(os.homedir(), "Documents"),
+    path.join(os.homedir(), "Library", "CloudStorage"),
+    path.join(os.homedir(), "Library", "Mobile Documents"),
+  ];
+  if (
+    fileProviderRoots.some(
+      (candidate) =>
+        repositoryRoot === candidate ||
+        repositoryRoot.startsWith(`${candidate}${path.sep}`),
+    )
+  )
+    return [];
   const found: string[] = [];
-  const stack = [{ dir: path.resolve(root), depth: 0 }];
-  while (stack.length && found.length < 200) {
+  const stack = [{ dir: repositoryRoot, depth: 0 }];
+  let inspectedDirectoryCount = 0;
+  while (
+    stack.length &&
+    found.length < 200 &&
+    inspectedDirectoryCount < 2_000
+  ) {
     const { dir, depth } = stack.pop()!;
     if (depth > 5) continue;
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
+      inspectedDirectoryCount += 1;
     } catch {
       continue;
     }
@@ -6818,6 +6854,10 @@ function friendlyAction(eventName?: string, toolName?: string) {
 let lastAgentDoneSoundAt = 0;
 let lastQuestionSoundAt = 0;
 function handleLocalAgentStop(event: { agent: string; body: unknown }) {
+  if (isBackgroundControlPending({
+    agent_kind: event.agent,
+    payload: event.body,
+  })) return;
   const body = objectValue(event.body);
   const agentName = localAgentDisplayName(event.agent);
   const sessionId = String(body?.session_id ?? body?.sessionId ?? "unknown");
@@ -7106,10 +7146,11 @@ function isLocalApiUrl(value: string) {
 }
 
 async function checkSelfHostedRuntime() {
-  const docker = spawnSync("docker", ["--version"], { encoding: "utf8" });
+  const dockerExecutable = findDockerExecutable();
+  const docker = spawnSync(dockerExecutable, ["--version"], { encoding: "utf8" });
   const dockerInstalled = docker.status === 0;
   const info = dockerInstalled
-    ? spawnSync("docker", ["info"], { encoding: "utf8", timeout: 8000 })
+    ? spawnSync(dockerExecutable, ["info"], { encoding: "utf8", timeout: 8000 })
     : undefined;
   const dockerRunning = Boolean(info && info.status === 0);
   const apiReachable = await canReach("http://127.0.0.1:9318/health");
@@ -7172,32 +7213,37 @@ async function startSelfHostedRuntime() {
     "individual-open-source",
   );
   ensureIndividualOpenSourceRuntime(runtimeDir);
+  const dockerExecutable = findDockerExecutable();
+  const dockerEnv = individualOpenSourceDockerEnvironment(runtimeDir);
   const compose = dockerComposeArgs();
   const setup = [
-    spawnSync("docker", [...compose, "pull"], {
+    spawnSync(dockerExecutable, [...compose, "pull"], {
       encoding: "utf8",
       timeout: 300000,
       cwd: runtimeDir,
+      env: dockerEnv,
     }),
-    spawnSync("docker", [...compose, "up", "-d", "postgres"], {
+    spawnSync(dockerExecutable, [...compose, "up", "-d", "postgres"], {
       encoding: "utf8",
       timeout: 180000,
       cwd: runtimeDir,
+      env: dockerEnv,
     }),
     spawnSync(
-      "docker",
+      dockerExecutable,
       [...compose, "--profile", "setup", "run", "--rm", "migrate"],
-      { encoding: "utf8", timeout: 180000, cwd: runtimeDir },
+      { encoding: "utf8", timeout: 180000, cwd: runtimeDir, env: dockerEnv },
     ),
     spawnSync(
-      "docker",
+      dockerExecutable,
       [...compose, "--profile", "setup", "run", "--rm", "seed"],
-      { encoding: "utf8", timeout: 180000, cwd: runtimeDir },
+      { encoding: "utf8", timeout: 180000, cwd: runtimeDir, env: dockerEnv },
     ),
-    spawnSync("docker", [...compose, "up", "-d", "client-api"], {
+    spawnSync(dockerExecutable, [...compose, "up", "-d", "client-api"], {
       encoding: "utf8",
       timeout: 180000,
       cwd: runtimeDir,
+      env: dockerEnv,
     }),
   ];
   const failed = setup.find((result) => result.status !== 0);
@@ -7224,11 +7270,30 @@ async function startSelfHostedRuntime() {
 }
 
 function dockerComposeArgs() {
-  const compose = spawnSync("docker", ["compose", "version"], {
+  const compose = spawnSync(findDockerExecutable(), ["compose", "version"], {
     encoding: "utf8",
   });
   if (compose.status === 0) return ["compose"];
   return ["compose"];
+}
+
+function individualOpenSourceDockerEnvironment(runtimeDir: string) {
+  // Public runtime images do not need the user's registry credentials. A GUI
+  // launch can otherwise hang forever in docker-credential-desktop while the
+  // keychain helper waits for an unavailable terminal interaction.
+  const configDir = path.join(runtimeDir, ".docker");
+  const configPath = path.join(configDir, "config.json");
+  fs.mkdirSync(configDir, { recursive: true });
+  const cliPluginsExtraDirs = process.platform === "darwin"
+    ? ["/Applications/Docker.app/Contents/Resources/cli-plugins"].filter(
+        (candidate) => fs.existsSync(candidate),
+      )
+    : [];
+  fs.writeFileSync(
+    configPath,
+    `${JSON.stringify({ cliPluginsExtraDirs }, null, 2)}\n`,
+  );
+  return { ...process.env, DOCKER_CONFIG: configDir };
 }
 
 function ensureIndividualOpenSourceRuntime(runtimeDir: string) {
@@ -7326,7 +7391,7 @@ services:
       OPENLEASH_DEV_ORG_SLUG: individual-open-source
       OPENLEASH_DEV_ORG_NAME: Individual Open Source
       OPENLEASH_DEPLOYMENT_MODE: individual-open-source
-    command: ["node", "apps/engine/dist/migrate.js", "--apply"]
+    command: ["node", "apps/client-api/dist/migrate.js", "--apply"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -7336,7 +7401,7 @@ services:
     profiles: ["setup"]
     environment:
       DATABASE_URL: postgres://\${OPENLEASH_POSTGRES_USER:-openleash}:\${OPENLEASH_POSTGRES_PASSWORD:-openleash}@postgres:5432/\${OPENLEASH_POSTGRES_DB:-openleash}
-    command: ["node", "apps/engine/dist/bootstrap-personal.js", "--name", "Individual Open Source", "--slug", "individual-open-source", "--mode", "private"]
+    command: ["node", "apps/client-api/dist/bootstrap-personal.js", "--name", "Individual Open Source", "--slug", "individual-open-source", "--mode", "private"]
     depends_on:
       postgres:
         condition: service_healthy

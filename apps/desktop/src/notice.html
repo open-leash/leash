@@ -984,6 +984,7 @@
       let selectedAnswers = new Map();
       let expandTimer;
       let pointerInsideIsland = false;
+      let pointerLeaveTimer;
       let pointerInsideVerificationOverride = null;
       let installAnimation;
       const $ = (id) => document.getElementById(id);
@@ -1250,9 +1251,8 @@
           nextAttention?.intentKey &&
           previousAttention.intentKey === nextAttention.intentKey
         );
-        const hasLiveSession = (payload.sessions || []).some((session) => session.visualState !== "completed");
         const preserveExpanded = island.classList.contains("expanded") && (
-          sameAttention || (pointerInsideIsland && previousKind === "activity" && nextKind === "activity" && hasLiveSession)
+          sameAttention || (pointerInsideIsland && previousKind === "activity" && nextKind === "activity")
         );
         const draftGuidance = sameAttention
           ? (attentionPanel.querySelector(".attention-guidance")?.value ?? guidance.value)
@@ -1387,6 +1387,7 @@
       window.dismissOpenLeashNotice = () => { island.classList.add("leaving"); island.classList.remove("expanded"); resize(); };
       window.expandOpenLeashIsland = () => setExpanded(true);
       window.setOpenLeashPointerInsideForVerification = (inside) => {
+        clearTimeout(pointerLeaveTimer);
         pointerInsideVerificationOverride = Boolean(inside);
         pointerInsideIsland = pointerInsideVerificationOverride;
         return pointerInsideIsland;
@@ -1875,12 +1876,16 @@
       });
       cap.addEventListener("click", (event) => { if (!event.target.closest("button")) setExpanded(!island.classList.contains("expanded")); });
       island.addEventListener("pointerenter", () => {
+        clearTimeout(pointerLeaveTimer);
         if (pointerInsideVerificationOverride === null) pointerInsideIsland = true;
         bridge.setNoticePointerInside?.(true);
       });
       island.addEventListener("pointerleave", () => {
-        if (pointerInsideVerificationOverride === null) pointerInsideIsland = false;
         bridge.setNoticePointerInside?.(false);
+        if (pointerInsideVerificationOverride === null) {
+          clearTimeout(pointerLeaveTimer);
+          pointerLeaveTimer = setTimeout(() => { pointerInsideIsland = false; }, 300);
+        }
       });
       notchRail.addEventListener("click", () => { if (island.classList.contains("activity-mode")) setExpanded(true); });
       $("toggle").addEventListener("click", () => setExpanded(!island.classList.contains("expanded")));

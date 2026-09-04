@@ -12,7 +12,7 @@ export declare const LEASH_FEATURE_PRESENTATIONS: {
         readonly id: "openleash.blast-radius";
         readonly slug: "blast-radius";
         readonly name: "Destructive Protection";
-        readonly description: "Stops AI before it deletes files, damages your database, or breaks your project.";
+        readonly description: "Stops AI before it recursively deletes folders, wipes databases, or makes other broad destructive changes.";
         readonly category: "protection";
         readonly iconText: "💥";
         readonly showcaseOrder: 1;
@@ -86,7 +86,7 @@ export declare function leashFeaturePresentation(value: string | undefined | nul
     readonly id: "openleash.blast-radius";
     readonly slug: "blast-radius";
     readonly name: "Destructive Protection";
-    readonly description: "Stops AI before it deletes files, damages your database, or breaks your project.";
+    readonly description: "Stops AI before it recursively deletes folders, wipes databases, or makes other broad destructive changes.";
     readonly category: "protection";
     readonly iconText: "💥";
     readonly showcaseOrder: 1;
@@ -151,7 +151,7 @@ export declare const LEASH_FEATURE_SHOWCASE: ({
     readonly id: "openleash.blast-radius";
     readonly slug: "blast-radius";
     readonly name: "Destructive Protection";
-    readonly description: "Stops AI before it deletes files, damages your database, or breaks your project.";
+    readonly description: "Stops AI before it recursively deletes folders, wipes databases, or makes other broad destructive changes.";
     readonly category: "protection";
     readonly iconText: "💥";
     readonly showcaseOrder: 1;

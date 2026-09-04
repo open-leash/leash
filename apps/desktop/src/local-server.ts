@@ -33,6 +33,7 @@ import {
   AvailabilityCircuitBreaker,
   isAvailabilityHttpStatus,
 } from "./availability-circuit";
+import { isBackgroundControlPrompt } from "./activity-island";
 
 const ACTION_PURPOSE_CONTEXT_MESSAGES = Number(process.env.OPENLEASH_ACTION_PURPOSE_MESSAGES ?? 5);
 type ClientMode = "personal" | "cloud" | "custom";
@@ -965,6 +966,13 @@ export class LocalOpenLeashServer {
       if (req.method === "POST" && hookMatch) {
         const body = await readJson(req);
         const request = normalizeHookRequest(hookMatch[1], hookMatch[2], body, req.url ?? "");
+        if (isBackgroundControlPrompt(request.agent.kind, request.event.prompt)) {
+          return json(res, nativeHookDecision(
+            hookMatch[1],
+            hookMatch[2],
+            { decision: "allow", summary: "Ignored private agent UI traffic." },
+          ));
+        }
         if (this.isMonitoringExcluded(request.agent.kind, request.event.sessionId, request.event.projectPath)) {
           return json(res, nativeHookDecision(
             hookMatch[1],

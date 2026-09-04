@@ -258,15 +258,15 @@ try {
     title: "3 agents working",
     project: "3 active sessions",
     sessions: [
-      { id: "claude", agentKind: "claude-code", agentName: "Claude Code", visualState: "running", project: "client-api", title: "Test Claude", latestAction: "Running another test", eventCount: 4 },
-      { id: "codex", sessionId: "codex-session", agentKind: "codex", agentName: "OpenAI Codex", visualState: "processing", project: "desktop", title: "Test Codex", latestAction: "Editing files", eventCount: 5 },
-      { id: "gemini", agentKind: "gemini", agentName: "Gemini CLI", visualState: "processing", project: "docs", title: "Test Gemini", latestAction: "Reading docs", eventCount: 2 },
+      { id: "claude", agentKind: "claude-code", agentName: "Claude Code", visualState: "completed", project: "client-api", title: "Test Claude", latestAction: "Tests finished", eventCount: 4 },
+      { id: "codex", sessionId: "codex-session", agentKind: "codex", agentName: "OpenAI Codex", visualState: "completed", project: "desktop", title: "Test Codex", latestAction: "Edits finished", eventCount: 5 },
+      { id: "gemini", agentKind: "gemini", agentName: "Gemini CLI", visualState: "completed", project: "docs", title: "Test Gemini", latestAction: "Review finished", eventCount: 2 },
     ],
     tokenSaver: { pluginId: "openleash.prompt-compression", pluginName: "token-saver", value: "42% saved", tone: "success" },
   } });
   const hoveredUpdate = await inspectAfter(450);
   assert.equal(hoveredUpdate.layout.pointerInsideIsland, true, "hover verification did not reach the island renderer");
-  assert.equal(hoveredUpdate.layout.expanded, true, "an activity refresh collapsed the island while the pointer was inside");
+  assert.equal(hoveredUpdate.layout.expanded, true, "a completion refresh collapsed the island while the pointer was inside");
   send({ type: "pointerOutside" });
   const pointerOutside = await waitFor("pointerInsideResult");
   assert.equal(pointerOutside.applied, true, "pointer-leave verification command was not applied by the island renderer");

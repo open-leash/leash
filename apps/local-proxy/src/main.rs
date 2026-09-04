@@ -381,10 +381,10 @@ async fn forward(
     };
     let background_control_request =
         intercept && is_background_control_request(&agent_kind, &value);
-    // Background control requests (for example Claude's session-title
-    // generation) can still contain the user's complete prompt. Keep them out
-    // of agent-activity and response telemetry, but never bypass request
-    // transformation or policy enforcement.
+    // Background control requests are private provider UI traffic rather than
+    // a user-authored agent turn. They may still be transformed on the way to
+    // the provider, but must never create activity, a DLP approval, or response
+    // telemetry in Leash.
     if intercept {
         let transformation = tokio::time::timeout(
             Duration::from_secs(app.config.evaluation_timeout_seconds),
@@ -420,7 +420,7 @@ async fn forward(
                 app.availability_bypasses.fetch_add(1, Ordering::Relaxed);
             }
         }
-        if !monitoring_paused {
+        if !monitoring_paused && !background_control_request {
             let evaluation = tokio::time::timeout(
                 Duration::from_secs(app.config.evaluation_timeout_seconds),
                 evaluate(
@@ -508,7 +508,7 @@ async fn forward(
         && !monitoring_paused
         && !background_control_request
         && status.is_success()
-        && request_can_produce_tools(&value)
+        && request_may_produce_tools(&value, &agent_kind)
     {
         let _gate_permit = app.gate_slots.acquire().await.map_err(|_| {
             (
@@ -783,7 +783,16 @@ async fn report_response(
 }
 
 fn response_observation_for_content_type(content_type: &str, bytes: &[u8]) -> ResponseObservation {
-    if content_type.contains("text/event-stream") {
+    let prefix = bytes
+        .iter()
+        .copied()
+        .skip_while(|byte| byte.is_ascii_whitespace())
+        .take(6)
+        .collect::<Vec<_>>();
+    if content_type.contains("text/event-stream")
+        || prefix.starts_with(b"event:")
+        || prefix.starts_with(b"data:")
+    {
         sse_observation(bytes)
     } else {
         serde_json::from_slice::<Value>(bytes)
@@ -833,6 +842,8 @@ struct ResponseObservation {
 fn sse_observation(bytes: &[u8]) -> ResponseObservation {
     let normalized = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
     let mut observation = ResponseObservation::default();
+    let mut streamed_text = String::new();
+    let mut completed_text = String::new();
     let mut streamed_tool_name: Option<String> = None;
     let mut streamed_tool_arguments = String::new();
     for event in normalized.split("\n\n") {
@@ -847,7 +858,12 @@ fn sse_observation(bytes: &[u8]) -> ResponseObservation {
         let Ok(value) = serde_json::from_str::<Value>(&data) else {
             continue;
         };
-        observation.text.push_str(&response_text(&value));
+        let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if let Some(delta) = sse_response_text_delta(&value) {
+            streamed_text.push_str(&delta);
+        } else if !is_streamed_tool_input_event(event_type) {
+            completed_text.push_str(&response_text(&value));
+        }
         if let Some(block) = value.get("content_block") {
             if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                 streamed_tool_name = block.get("name").and_then(Value::as_str).map(str::to_owned);
@@ -865,13 +881,16 @@ fn sse_observation(bytes: &[u8]) -> ResponseObservation {
         {
             streamed_tool_arguments.push_str(partial);
         }
-        if value
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| kind.contains("function_call_arguments.delta"))
+        if event_type.contains("function_call_arguments.delta")
+            || event_type.contains("custom_tool_call_input.delta")
         {
             if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                 streamed_tool_arguments.push_str(delta);
+            }
+        }
+        if event_type.contains("custom_tool_call_input.done") {
+            if let Some(input) = value.get("input").and_then(Value::as_str) {
+                streamed_tool_arguments = input.to_owned();
             }
         }
         if let Some(function) = value
@@ -907,12 +926,14 @@ fn sse_observation(bytes: &[u8]) -> ResponseObservation {
                     .and_then(Value::as_str)
                     .or_else(|| item.get("type").and_then(Value::as_str))
                     .map(str::to_owned);
-                if let Some(arguments) = item
-                    .get("arguments")
-                    .or_else(|| item.get("input"))
-                    .and_then(Value::as_str)
-                {
-                    streamed_tool_arguments.push_str(arguments);
+                if let Some(arguments) = item.get("arguments").or_else(|| item.get("input")) {
+                    let arguments = arguments
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| arguments.to_string());
+                    if event_type.ends_with(".done") || streamed_tool_arguments.is_empty() {
+                        streamed_tool_arguments = arguments;
+                    }
                 }
             }
         }
@@ -923,9 +944,67 @@ fn sse_observation(bytes: &[u8]) -> ResponseObservation {
     if let Some(name) = streamed_tool_name {
         let input = serde_json::from_str::<Value>(&streamed_tool_arguments)
             .unwrap_or(Value::String(streamed_tool_arguments));
-        observation.tool = Some(json!({"name":name,"input":input}));
+        observation.tool = Some(normalize_response_tool(&name, input));
     }
+    observation.text = if streamed_text.is_empty() {
+        completed_text
+    } else {
+        streamed_text
+    };
     observation
+}
+
+fn is_streamed_tool_input_event(event_type: &str) -> bool {
+    event_type.contains("function_call_arguments") || event_type.contains("custom_tool_call_input")
+}
+
+fn sse_response_text_delta(value: &Value) -> Option<String> {
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    if is_streamed_tool_input_event(event_type) {
+        return None;
+    }
+    if event_type == "response.output_text.delta" {
+        return value
+            .get("delta")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    if event_type == "content_block_delta"
+        && value
+            .get("delta")
+            .and_then(|delta| delta.get("type"))
+            .and_then(Value::as_str)
+            == Some("text_delta")
+    {
+        return value
+            .get("delta")
+            .and_then(|delta| delta.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    if let Some(text) = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("delta"))
+        .and_then(|delta| delta.get("content"))
+        .and_then(Value::as_str)
+    {
+        return Some(text.to_owned());
+    }
+    if event_type.is_empty() {
+        if let Some(text) = value.get("delta").and_then(Value::as_str) {
+            return Some(text.to_owned());
+        }
+        if let Some(text) = value
+            .get("delta")
+            .and_then(|delta| delta.get("text"))
+            .and_then(Value::as_str)
+        {
+            return Some(text.to_owned());
+        }
+    }
+    None
 }
 
 fn response_observation(value: &Value) -> ResponseObservation {
@@ -936,19 +1015,18 @@ fn response_observation(value: &Value) -> ResponseObservation {
 }
 
 fn response_tool(value: &Value) -> Option<Value> {
-    let candidate = if value
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| {
-            matches!(
-                kind,
-                "tool_use"
-                    | "function_call"
-                    | "response.output_item.added"
-                    | "response.output_item.done"
-            )
-        }) {
-        value.get("item").unwrap_or(value)
+    let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+    let candidate = if is_tool_response_item_kind(kind) {
+        value
+    } else if matches!(
+        kind,
+        "response.output_item.added" | "response.output_item.done"
+    ) {
+        value.get("item").filter(|item| {
+            item.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(is_tool_response_item_kind)
+        })?
     } else if let Some(tool) = value
         .get("content")
         .and_then(Value::as_array)
@@ -1005,7 +1083,71 @@ fn response_tool(value: &Value) -> Option<Value> {
         .or_else(|| candidate.get("command"))
         .cloned()
         .unwrap_or(Value::Null);
-    Some(json!({"name":name,"input":input}))
+    Some(normalize_response_tool(name, input))
+}
+
+fn is_tool_response_item_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "tool_use" | "function_call" | "computer_call" | "local_shell_call" | "custom_tool_call"
+    )
+}
+
+fn normalize_response_tool(name: &str, input: Value) -> Value {
+    if name == "exec" {
+        if let Some(code) = input.as_str() {
+            if let Some((nested_name, nested_input)) = nested_codex_tool_call(code) {
+                return json!({"name":nested_name,"input":nested_input});
+            }
+        }
+    }
+    json!({"name":name,"input":input})
+}
+
+fn nested_codex_tool_call(code: &str) -> Option<(String, Value)> {
+    let tools_offset = code.find("tools.")? + "tools.".len();
+    let tail = &code[tools_offset..];
+    let open_paren = tail.find('(')?;
+    let name = tail[..open_paren].trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    let arguments = tail[open_paren + 1..].trim_start();
+    if !arguments.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, character) in arguments.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    let input = serde_json::from_str::<Value>(&arguments[..=offset]).ok()?;
+                    return Some((name.to_owned(), input));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn response_text(value: &Value) -> String {
@@ -1401,12 +1543,24 @@ fn is_background_control_request(agent_kind: &str, body: &Value) -> bool {
                 && normalized.contains("ignore the language of the examples above")
         }
         "codex" => {
-            normalized.contains("you will be presented with a user prompt")
+            let task_title = normalized.contains("you will be presented with a user prompt")
                 && normalized.contains(
                     "provide a short title for a task that will be created from that prompt",
                 )
                 && normalized.contains("generate a concise ui title")
-                && normalized.contains("fill the structured title field with plain text")
+                && normalized.contains("fill the structured title field with plain text");
+            let project_suggestions = normalized.contains(
+                "generate 0 to 3 hyperpersonalized suggestions for what this user can do with codex",
+            ) && normalized.contains("in this local project")
+                && normalized.contains(
+                    "get an understanding of the user's intent and goals",
+                );
+            let ambient_suggestion_review = normalized.contains(
+                "you are an expert at upholding safety and compliance standards for codex ambient suggestions",
+            ) && normalized.contains("# ambient suggestion candidates")
+                && normalized.contains("suggestions to exclude")
+                && normalized.contains("you must not output any other text");
+            task_title || project_suggestions || ambient_suggestion_review
         }
         _ => false,
     }
@@ -1655,6 +1809,14 @@ fn request_can_produce_tools(body: &Value) -> bool {
                 })
             })
 }
+
+fn request_may_produce_tools(body: &Value, agent_kind: &str) -> bool {
+    // Codex can receive provider-defined local shell tools even when the
+    // Responses request does not include an explicit top-level `tools` array.
+    // Gate its non-background responses so those tool calls are evaluated
+    // before the client can execute them.
+    agent_kind == "codex" || request_can_produce_tools(body)
+}
 fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::BAD_GATEWAY, error.to_string())
 }
@@ -1734,6 +1896,33 @@ mod tests {
         assert_eq!(sse_observation(body).text, "hello world");
     }
     #[test]
+    fn codex_sse_uses_deltas_without_repeating_the_completed_text() {
+        let body = r#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"¡Hola! "}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"¿En qué te ayudo?"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","text":"¡Hola! ¿En qué te ayudo?"}
+
+data: [DONE]
+
+"#
+        .as_bytes();
+        assert_eq!(sse_observation(body).text, "¡Hola! ¿En qué te ayudo?");
+    }
+    #[test]
+    fn codex_sse_uses_completed_text_when_no_deltas_are_present() {
+        let body = br#"event: response.output_text.done
+data: {"type":"response.output_text.done","text":"hello"}
+
+data: [DONE]
+
+"#;
+        assert_eq!(sse_observation(body).text, "hello");
+    }
+    #[test]
     fn responses_items_preserve_tools_and_replace_latest_user_text() {
         let mut value = json!({"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"old"}]},{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"ls\"}"},{"type":"function_call_output","output":"ok"}]});
         let transcript = normalized_transcript(&value);
@@ -1747,6 +1936,43 @@ mod tests {
         let body =
             b"event: response.output_text.delta\r\ndata: {\"delta\":\r\ndata: \"hello\"}\r\n\r\n";
         assert_eq!(sse_observation(body).text, "hello");
+    }
+    #[test]
+    fn parses_codex_custom_tool_call_input_deltas() {
+        let body = br#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","name":"exec","input":""}}
+
+event: response.custom_tool_call_input.delta
+data: {"type":"response.custom_tool_call_input.delta","delta":"const r = await tools.exec_command({\"cmd\":\"rm -- delete-me.txt\"});"}
+
+event: response.custom_tool_call_input.done
+data: {"type":"response.custom_tool_call_input.done","input":"const r = await tools.exec_command({\"cmd\":\"rm -- delete-me.txt\"});"}
+
+data: [DONE]
+
+"#;
+        let tool = sse_observation(body).tool.expect("Codex custom tool call");
+        assert_eq!(tool["name"], "exec_command");
+        assert_eq!(tool["input"]["cmd"], "rm -- delete-me.txt");
+    }
+    #[test]
+    fn does_not_classify_responses_message_items_as_tools() {
+        let event = json!({
+            "type":"response.output_item.added",
+            "item":{"type":"message","role":"assistant","content":[]}
+        });
+        assert!(response_tool(&event).is_none());
+    }
+    #[test]
+    fn sniffs_sse_when_upstream_omits_content_type() {
+        let body = br#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","name":"exec","input":"rm -- delete-me.txt"}}
+
+data: [DONE]
+
+"#;
+        let observation = response_observation_for_content_type("", body);
+        assert_eq!(observation.tool.expect("sniffed SSE")["name"], "exec");
     }
     #[test]
     fn upstream_url_preserves_prefix_query_and_avoids_duplicate_prefix() {
@@ -1822,6 +2048,19 @@ mod tests {
         assert_eq!(response_tool(&response).unwrap()["name"], "shell");
     }
     #[test]
+    fn treats_codex_responses_as_tool_capable_without_explicit_tools() {
+        let request = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type":"input_text","text":"Delete delete-me.txt"}]
+            }]
+        });
+        assert!(!request_can_produce_tools(&request));
+        assert!(request_may_produce_tools(&request, "codex"));
+        assert!(!request_may_produce_tools(&request, "claude-code"));
+    }
+    #[test]
     fn recognizes_claude_session_title_generation_as_background_control_traffic() {
         let request = json!({
             "messages": [{
@@ -1845,6 +2084,36 @@ mod tests {
                 "content": [{
                     "type": "input_text",
                     "text": "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt.\nGenerate a concise UI title (up to 36 characters) for this task.\nFill the structured title field with plain text.\n\nUser prompt:\nSummarize run.py"
+                }]
+            }]
+        });
+        assert!(is_background_control_request("codex", &request));
+        assert!(!is_background_control_request("claude-code", &request));
+    }
+    #[test]
+    fn recognizes_codex_project_suggestions_as_background_control_traffic() {
+        let request = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "# Overview\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex in this local project: /Users/max/Documents/New project\nGet an understanding of the user's intent and goals by deeply viewing the project."
+                }]
+            }]
+        });
+        assert!(is_background_control_request("codex", &request));
+        assert!(!is_background_control_request("claude-code", &request));
+    }
+    #[test]
+    fn recognizes_codex_ambient_suggestion_review_as_background_control_traffic() {
+        let request = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You are an expert at upholding safety and compliance standards for Codex ambient suggestions.\n# Ambient suggestion candidates\nHere are the candidates.\nReturn suggestions to exclude. You must not output any other text."
                 }]
             }]
         });

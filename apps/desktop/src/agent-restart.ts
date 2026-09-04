@@ -18,7 +18,7 @@ export type RestartProject = {
 export type RunningAgentRestartTarget = {
   id: string;
   application: string;
-  applicationKind: "vscode" | "cursor" | "windsurf" | "terminal";
+  applicationKind: "vscode" | "cursor" | "windsurf" | "codex" | "terminal";
   icon: string;
   agentKinds: string[];
   agentNames: string[];
@@ -107,6 +107,7 @@ export function groupRunningAgentProcesses(
     const directHostKind = applicationKindForCommand(item.command);
     if (directHostKind === "cursor" && normalizedKinds.includes("cursor")) matchingKinds.push("cursor");
     if (directHostKind === "windsurf" && normalizedKinds.includes("windsurf")) matchingKinds.push("windsurf");
+    if (directHostKind === "codex" && normalizedKinds.includes("codex")) matchingKinds.push("codex");
     if (matchingKinds.length === 0) continue;
 
     const host = findApplicationHost(item, byPid);
@@ -164,7 +165,8 @@ export function detectRunningAgentRestartTargets(monitoredKinds: string[]) {
     if (
       normalizedKinds.some((kind) => processMatchesKind(item.command, kind)) ||
       (directHost === "cursor" && normalizedKinds.includes("cursor")) ||
-      (directHost === "windsurf" && normalizedKinds.includes("windsurf"))
+      (directHost === "windsurf" && normalizedKinds.includes("windsurf")) ||
+      (directHost === "codex" && normalizedKinds.includes("codex"))
     ) item.cwd = cwdForPid(item.pid);
   }
   const runningApplications = new Set(processes.map((item) => applicationKindForCommand(item.command)).filter(Boolean));
@@ -209,21 +211,24 @@ function findApplicationHost(item: RestartProcess, byPid: Map<number, RestartPro
   return undefined;
 }
 
-function applicationKindForCommand(command: string): "vscode" | "cursor" | "windsurf" | undefined {
+function applicationKindForCommand(command: string): "vscode" | "cursor" | "windsurf" | "codex" | undefined {
   const value = command.toLowerCase();
   if (value.includes("/visual studio code.app/") || value.includes("\\microsoft vs code\\") || value.includes("\\code.exe")) return "vscode";
   if (value.includes("/cursor.app/") || value.includes("\\cursor\\") || value.includes("\\cursor.exe")) return "cursor";
   if (value.includes("/windsurf.app/") || value.includes("\\windsurf\\") || value.includes("\\windsurf.exe")) return "windsurf";
+  if (value.includes("/chatgpt.app/") || value.includes("\\codex\\") || value.includes("\\codex.exe")) return "codex";
   return undefined;
 }
 
-function applicationName(kind: "vscode" | "cursor" | "windsurf") {
+function applicationName(kind: "vscode" | "cursor" | "windsurf" | "codex") {
   if (kind === "vscode") return "Visual Studio Code";
   if (kind === "cursor") return "Cursor";
+  if (kind === "codex") return "Codex";
   return "Windsurf";
 }
 
-function applicationIcon(kind: "vscode" | "cursor" | "windsurf") {
+function applicationIcon(kind: "vscode" | "cursor" | "windsurf" | "codex") {
+  if (kind === "codex") return "agent-icons/openai.svg";
   return `agent-icons/${kind}.${kind === "vscode" ? "png" : "svg"}`;
 }
 
@@ -342,7 +347,10 @@ async function restartMacTarget(target: RunningAgentRestartTarget) {
     child.unref();
     return { ok: true };
   }
-  const application = target.application;
+  // The standalone Codex surface currently ships inside ChatGPT.app on macOS.
+  // Keep the user-facing target named Codex, but address the real bundle when
+  // quitting and reopening it after protection changes.
+  const application = macRestartApplicationName(applicationKind, target.application);
   const result = await runCommand("/usr/bin/osascript", ["-e", `tell application ${appleScriptString(application)} to quit`], 20_000);
   if (result.error && result.error.code !== "ETIMEDOUT") {
     return { ok: false, error: result.error.message };
@@ -354,6 +362,13 @@ async function restartMacTarget(target: RunningAgentRestartTarget) {
   return { ok: true };
 }
 
+export function macRestartApplicationName(
+  applicationKind: RunningAgentRestartTarget["applicationKind"],
+  displayName: string,
+) {
+  return applicationKind === "codex" ? "ChatGPT" : displayName;
+}
+
 async function restartWindowsTarget(target: RunningAgentRestartTarget) {
   const projects = target.projects.map((project) => project.path).filter(Boolean) as string[];
   const processNames = target.applicationKind === "vscode"
@@ -362,6 +377,8 @@ async function restartWindowsTarget(target: RunningAgentRestartTarget) {
       ? ["Cursor"]
       : target.applicationKind === "windsurf"
         ? ["Windsurf"]
+        : target.applicationKind === "codex"
+          ? ["Codex", "ChatGPT"]
         : [];
   const cli = target.applicationKind === "terminal" ? CLI_COMMANDS[target.agentKinds[0]] : undefined;
   const ideCommand = target.applicationKind === "vscode" ? "code" : target.applicationKind;
@@ -388,8 +405,14 @@ async function restartWindowsTarget(target: RunningAgentRestartTarget) {
   return result.status === 0 ? { ok: true } : { ok: false, error: String(result.stderr || "The application did not restart.").trim() };
 }
 
-function macApplicationRunning(kind: "vscode" | "cursor" | "windsurf") {
-  const needle = kind === "vscode" ? "/Visual Studio Code.app/" : kind === "cursor" ? "/Cursor.app/" : "/Windsurf.app/";
+function macApplicationRunning(kind: "vscode" | "cursor" | "windsurf" | "codex") {
+  const needle = kind === "vscode"
+    ? "/Visual Studio Code.app/"
+    : kind === "cursor"
+      ? "/Cursor.app/"
+      : kind === "codex"
+        ? "/ChatGPT.app/"
+        : "/Windsurf.app/";
   return parseRestartProcessTree(commandOutput("/bin/ps", ["-axo", "pid=,ppid=,command="]))
     .some((item) => item.command.includes(needle));
 }

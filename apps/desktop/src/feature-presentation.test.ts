@@ -142,6 +142,7 @@ test("Settings can completely uninstall Leash and its local runtime on macOS", (
   assert.match(uninstallHandler, /await cleanupDesktopIntegrations\(\)/);
   assert.match(uninstallHandler, /startCompleteMacUninstall\(runtimeDir\)/);
   assert.match(desktopMain, /\[helper, "--uninstall", "--target", installDirectory, "--quiet"\]/);
+  assert.match(desktopMain, /setTimeout\(quitOpenLeash, 100\)/);
   assert.match(installer, /uninstallAllAgentProtections\(\)/);
   assert.match(installer, /uninstallLocalProxy\(\)/);
   assert.match(installer, /compose down -v --remove-orphans/);
@@ -149,6 +150,13 @@ test("Settings can completely uninstall Leash and its local runtime on macOS", (
   assert.match(installer, /Application Support\/Leash/);
   assert.match(installer, /Preferences\/com\.openleash\.personal\.plist/);
   assert.match(installer, /HTTPStorages\/com\.openleash\.personal/);
+});
+
+test("Settings disclosures stay open across background state refreshes", () => {
+  assert.match(renderer, /const openSettingsDisclosureIds = new Set\(\)/);
+  assert.match(renderer, /details\.settingsDisclosure\[id\]/);
+  assert.match(renderer, /id="dangerDisclosure" \$\{openSettingsDisclosureIds\.has\("dangerDisclosure"\) \? "open" : ""\}/);
+  assert.match(renderer, /details\.ontoggle = \(\) =>/);
 });
 
 test("desktop Overview focuses on monitored activity and Agents owns enablement", () => {

@@ -244,7 +244,10 @@ copy_app() {
     sudo xattr -cr "$stage_app" 2>/dev/null || true
   fi
 
-  if [[ "$HAD_EXISTING_LOCAL_STATE" -eq 1 ]]; then
+  # A settings-preserving update lets the new app snapshot the currently
+  # protected agents, clean the old integration, and restore it with the new
+  # bundle. Cleaning here would erase that snapshot before startup.
+  if [[ "$HAD_EXISTING_LOCAL_STATE" -eq 1 && "$KEEP_SETTINGS" -eq 0 ]]; then
     cleanup_existing_integrations "$stage_app"
   fi
 
@@ -524,7 +527,7 @@ services:
       OPENLEASH_MIGRATION_LOG_DIR: /var/log/openleash
     volumes:
       - ./migration-logs:/var/log/openleash
-    command: ["node", "apps/engine/dist/migrate.js", "--apply"]
+    command: ["node", "apps/client-api/dist/migrate.js", "--apply"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -534,7 +537,7 @@ services:
     profiles: ["setup"]
     environment:
       DATABASE_URL: postgres://${OPENLEASH_POSTGRES_USER:-openleash}:${OPENLEASH_POSTGRES_PASSWORD:-openleash}@postgres:5432/${OPENLEASH_POSTGRES_DB:-openleash}
-    command: ["node", "apps/engine/dist/bootstrap-personal.js", "--name", "Individual Open Source", "--slug", "individual-open-source", "--mode", "private"]
+    command: ["node", "apps/client-api/dist/bootstrap-personal.js", "--name", "Individual Open Source", "--slug", "individual-open-source", "--mode", "private"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -660,16 +663,19 @@ if [[ "$NO_LAUNCH" -eq 0 ]]; then
   log "Starting $APP_NAME..."
   app_executable="$TARGET_APP/Contents/MacOS/$APP_NAME"
   if [[ -x "$app_executable" ]]; then
-    launch_label="com.openleash.installer-launch"
-    launchctl remove "$launch_label" >/dev/null 2>&1 || true
-    launchctl submit -l "$launch_label" -- /usr/bin/env -u ELECTRON_RUN_AS_NODE "$app_executable" "${args[@]}"
+    # A submitted launchctl job is inferred as KeepAlive on macOS. Keeping the
+    # installer-owned job around would relaunch Leash with --fresh-install on
+    # every quit and reset a completed setup. Launch through Launch Services so
+    # the first-run flags apply exactly once and normal app restarts stay normal.
+    launchctl remove com.openleash.installer-launch >/dev/null 2>&1 || true
+    /usr/bin/env -u ELECTRON_RUN_AS_NODE open -na "$TARGET_APP" --args "${args[@]}"
     sleep 2
-    if ! launchctl list "$launch_label" >/dev/null 2>&1; then
+    if ! pgrep -f "$app_executable" >/dev/null 2>&1; then
       log "The first launch ended early; retrying once..."
       sleep 1
-      launchctl submit -l "$launch_label" -- /usr/bin/env -u ELECTRON_RUN_AS_NODE "$app_executable" "${args[@]}"
+      /usr/bin/env -u ELECTRON_RUN_AS_NODE open -na "$TARGET_APP" --args "${args[@]}"
       sleep 2
-      launchctl list "$launch_label" >/dev/null 2>&1 ||
+      pgrep -f "$app_executable" >/dev/null 2>&1 ||
         die "Leash was installed but could not stay running."
     fi
   else

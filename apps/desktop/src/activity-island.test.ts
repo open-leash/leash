@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import type { PluginIslandContribution } from "@openleash/shared";
 import {
@@ -11,6 +13,7 @@ import {
   recoverSuspendedAgentSessions,
   contributionsForSession,
   islandDisplayTargets,
+  isBackgroundControlPending,
   latestTokenSaverSavings,
   mergeImmediateAgentActivity,
   prioritizeAgentSessions,
@@ -233,6 +236,53 @@ test("shows the latest user request and explains tools in plain language", () =>
   assert.equal(session?.summary, "11 actions · 2 approval requests · 1 blocked");
 });
 
+test("normalizes Codex HTML entities and duplicate streamed completion text", () => {
+  const now = Date.parse("2026-09-04T10:00:00.000Z");
+  const [session] = activeAgentSessions([{
+    kind: "codex",
+    display_name: "OpenAI Codex",
+    activity_at: new Date(now - 1_000).toISOString(),
+    sessions: [{
+      id: "codex-chatgpt-protocol",
+      title: "&#x20; hola",
+      summary: "¡Hola! ¿En qué te ayudo?¡Hola! ¿En qué te ayudo?",
+      last_activity_at: new Date(now - 1_000).toISOString(),
+      events: [],
+    }],
+  }], now);
+
+  assert.equal(session?.title, "hola");
+  assert.equal(session?.summary, "¡Hola! ¿En qué te ayudo?");
+});
+
+test("merges Codex hook and proxy records that share a session id", () => {
+  const now = Date.parse("2026-09-04T10:00:00.000Z");
+  const sessions = activeAgentSessions([{
+    kind: "codex",
+    display_name: "OpenAI Codex",
+    sessions: [
+      {
+        id: "hook-record",
+        session_id: "shared-codex-session",
+        project_path: "/code/project",
+        title: "hola",
+        last_activity_at: new Date(now - 1_000).toISOString(),
+      },
+      {
+        id: "proxy-record",
+        session_id: "shared-codex-session",
+        project_path: "/code/project",
+        title: "¡Hola! ¿En qué te ayudo?",
+        last_activity_at: new Date(now - 2_000).toISOString(),
+      },
+    ],
+  }], now);
+
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0]?.title, "hola");
+  assert.deepEqual(sessions[0]?.sourceSessionIds, ["shared-codex-session"]);
+});
+
 test("does not show Claude quota checks as active agent work", () => {
   const now = Date.parse("2026-07-20T10:00:00.000Z");
   const sessions = activeAgentSessions([{
@@ -273,6 +323,48 @@ test("does not show Codex task-title generation as active agent work", () => {
   }], now);
 
   assert.deepEqual(sessions, []);
+});
+
+test("does not show Codex project-suggestion generation or its stale approval", () => {
+  const now = Date.parse("2026-09-04T09:35:00.000Z");
+  const prompt = "# Overview Generate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex in this local project: /Users/max/Documents/New project Get an understanding of the user's intent and goals by deeply viewing the project.";
+  const sessions = activeAgentSessions([{
+    kind: "codex",
+    display_name: "OpenAI Codex",
+    activity_at: new Date(now - 1_000).toISOString(),
+    sessions: [{
+      id: "codex-project-suggestions",
+      title: prompt,
+      last_activity_at: new Date(now - 1_000).toISOString(),
+      events: [{ event_name: "UserPromptSubmit", prompt }],
+    }],
+  }], now);
+
+  assert.deepEqual(sessions, []);
+  assert.equal(isBackgroundControlPending({
+    agent_kind: "codex",
+    summary: "DLP paused the prompt for your approval",
+    payload: { prompt },
+  }), true);
+  assert.equal(isBackgroundControlPending({
+    agent_kind: "codex",
+    summary: "DLP paused the prompt for your approval",
+    payload: { prompt: "Please help me review this project" },
+  }), false);
+});
+
+test("recognizes Codex ambient-suggestion safety review as provider control traffic", () => {
+  const prompt = "You are an expert at upholding safety and compliance standards for Codex ambient suggestions. Then, I will show you a list. # Ambient suggestion candidates Here are the candidates. Return suggestions to exclude. You must not output any other text.";
+  assert.equal(isBackgroundControlPending({
+    agent_kind: "codex",
+    summary: "DLP paused the prompt for your approval: phi.",
+    payload: { prompt },
+  }), true);
+});
+
+test("does not notify or sound when a background-control conversation stops", () => {
+  const main = readFileSync(path.join(process.cwd(), "src", "main.ts"), "utf8");
+  assert.match(main, /function handleLocalAgentStop[\s\S]*?isBackgroundControlPending\(\{[\s\S]*?agent_kind: event\.agent,[\s\S]*?payload: event\.body,[\s\S]*?\}\)\) return;/);
 });
 
 test("does not show a Codex title-generation session without event details", () => {
