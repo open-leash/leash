@@ -7304,7 +7304,7 @@ function ensureIndividualOpenSourceRuntime(runtimeDir: string) {
       envPath,
       [
         "OPENLEASH_IMAGE_REGISTRY=ghcr.io/open-leash",
-        `OPENLEASH_VERSION=${process.env.OPENLEASH_BACKEND_VERSION || "0.37.0@sha256:caa0f268c62e5cf2cf29076877a8b6ca3caf00ddedc8c5229e10df8c929661db"}`,
+        `OPENLEASH_VERSION=${process.env.OPENLEASH_BACKEND_VERSION || "0.37.18@sha256:c4f2f115a2c7b4bf53bad27b88f0547825e04e2cf9b61f461f8b5efa6eec673c"}`,
         "OPENLEASH_POSTGRES_DB=openleash",
         "OPENLEASH_POSTGRES_USER=openleash",
         `OPENLEASH_POSTGRES_PASSWORD=${randomHexSecret()}`,
@@ -7382,7 +7382,7 @@ services:
       retries: 20
 
   migrate:
-    image: \${OPENLEASH_IMAGE_REGISTRY:-ghcr.io/open-leash}/client-api:\${OPENLEASH_VERSION:-0.37.0@sha256:caa0f268c62e5cf2cf29076877a8b6ca3caf00ddedc8c5229e10df8c929661db}
+    image: \${OPENLEASH_IMAGE_REGISTRY:-ghcr.io/open-leash}/client-api:\${OPENLEASH_VERSION:-0.37.18@sha256:c4f2f115a2c7b4bf53bad27b88f0547825e04e2cf9b61f461f8b5efa6eec673c}
     profiles: ["setup"]
     environment:
       DATABASE_URL: postgres://\${OPENLEASH_POSTGRES_USER:-openleash}:\${OPENLEASH_POSTGRES_PASSWORD:-openleash}@postgres:5432/\${OPENLEASH_POSTGRES_DB:-openleash}
@@ -7397,7 +7397,7 @@ services:
         condition: service_healthy
 
   seed:
-    image: \${OPENLEASH_IMAGE_REGISTRY:-ghcr.io/open-leash}/client-api:\${OPENLEASH_VERSION:-0.37.0@sha256:caa0f268c62e5cf2cf29076877a8b6ca3caf00ddedc8c5229e10df8c929661db}
+    image: \${OPENLEASH_IMAGE_REGISTRY:-ghcr.io/open-leash}/client-api:\${OPENLEASH_VERSION:-0.37.18@sha256:c4f2f115a2c7b4bf53bad27b88f0547825e04e2cf9b61f461f8b5efa6eec673c}
     profiles: ["setup"]
     environment:
       DATABASE_URL: postgres://\${OPENLEASH_POSTGRES_USER:-openleash}:\${OPENLEASH_POSTGRES_PASSWORD:-openleash}@postgres:5432/\${OPENLEASH_POSTGRES_DB:-openleash}
@@ -7407,7 +7407,7 @@ services:
         condition: service_healthy
 
   client-api:
-    image: \${OPENLEASH_IMAGE_REGISTRY:-ghcr.io/open-leash}/client-api:\${OPENLEASH_VERSION:-0.37.0@sha256:caa0f268c62e5cf2cf29076877a8b6ca3caf00ddedc8c5229e10df8c929661db}
+    image: \${OPENLEASH_IMAGE_REGISTRY:-ghcr.io/open-leash}/client-api:\${OPENLEASH_VERSION:-0.37.18@sha256:c4f2f115a2c7b4bf53bad27b88f0547825e04e2cf9b61f461f8b5efa6eec673c}
     container_name: openleash-individual-client-api
     environment:
       DATABASE_URL: postgres://\${OPENLEASH_POSTGRES_USER:-openleash}:\${OPENLEASH_POSTGRES_PASSWORD:-openleash}@postgres:5432/\${OPENLEASH_POSTGRES_DB:-openleash}
