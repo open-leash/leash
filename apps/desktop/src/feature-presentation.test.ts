@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { bundledFirstPartyPlugins } from "./plugin-catalog.js";
 
 const renderer = readFileSync(path.join(__dirname, "window.html"), "utf8");
 const islandRenderer = readFileSync(path.join(__dirname, "notice.html"), "utf8");
@@ -69,6 +70,18 @@ test("desktop groups built-in Features into plain-language Safety and Cost contr
   assert.match(renderer, /\{ id: "protection", label: "Safety"/);
   assert.match(renderer, /\{ id: "cost", label: "Cost control"/);
   assert.doesNotMatch(renderer, /\{ id: "security", label: "Security"/);
+});
+
+test("desktop exposes goal-aware and strict interruption modes with plain-language copy", () => {
+  for (const pluginId of ["openleash.dlp", "openleash.sensitive-access", "openleash.blast-radius"]) {
+    const plugin = bundledFirstPartyPlugins.find((item) => item.id === pluginId);
+    assert.ok(plugin, pluginId);
+    assert.equal(plugin.defaultConfig?.contextMode, "goal-aware", pluginId);
+    const properties = plugin.configSchema?.properties as Record<string, { enum?: string[] }> | undefined;
+    assert.deepEqual(properties?.contextMode?.enum, ["goal-aware", "strict"], pluginId);
+  }
+  assert.match(renderer, /Goal-aware: Ask only when Leash cannot confirm the action is needed for your current task\./);
+  assert.match(renderer, /Strict: Ask every time this protection matches\./);
 });
 
 test("macOS tray keeps the original colored Leash icon with stable placement", () => {

@@ -332,6 +332,13 @@ async function recentConversationContext({
         );
       }),
     );
+    const promptTurns = result.rows.slice().reverse().flatMap((row) => {
+      if (!row.payload || typeof row.payload !== "object") return [];
+      const payload = row.payload as { eventName?: unknown; prompt?: unknown };
+      if (payload.eventName !== "UserPromptSubmit" || typeof payload.prompt !== "string" || !payload.prompt.trim()) return [];
+      return [{ role: "user" as const, content: payload.prompt.trim().slice(0, 4_000) }];
+    });
+    if (promptTurns.length > 0) candidates.push(promptTurns);
   }
 
   const turns = candidates.reduce(

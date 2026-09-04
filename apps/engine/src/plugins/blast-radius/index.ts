@@ -1,6 +1,7 @@
 import { type PluginCapabilities, type PolicyDecision } from "@openleash/shared";
 import { eventForHookEvent } from "../events.js";
 import { pluginRun, type EvaluationPipelineInput } from "../types.js";
+import { contextMode, evaluateContextualNecessity, type ContextualNecessityDecision } from "../contextual-necessity.js";
 import { blastRadiusManifest as manifest } from "./manifest.js";
 
 export { manifest };
@@ -19,6 +20,26 @@ export async function runBlastRadius(input: EvaluationPipelineInput, capabilitie
   const text = eventText(input);
   const config = pluginConfig(input.plugins?.get(manifest.id)?.config);
   const matches = detectBlastRadius(text, config);
+  let contextual: ContextualNecessityDecision | undefined;
+  const contextualMatches = matches.filter((match) => match.action === "ask");
+  if (
+    config.contextMode === "goal-aware"
+    && contextualMatches.length > 0
+    && input.request.event.eventName === "PreToolUse"
+    && !isInherentlyBroadDestruction(text)
+  ) {
+    contextual = await evaluateContextualNecessity({
+      pipeline: input,
+      capabilities,
+      protectionId: manifest.id,
+      actionCategory: [...new Set(contextualMatches.map((match) => match.policyId))].sort().join(","),
+      actionDescription: contextualMatches.map((match) => match.explanation).join(" "),
+      evidence: contextualMatches.flatMap((match) => match.evidence),
+    });
+    if (contextual.allowWithoutAsking) {
+      for (const match of contextualMatches) match.action = "allow";
+    }
+  }
   const enforcedMatches = matches.filter((match) => match.action !== "allow");
   const results: PolicyDecision[] = enforcedMatches.map((match) => ({
     policyId: match.policyId,
@@ -40,7 +61,11 @@ export async function runBlastRadius(input: EvaluationPipelineInput, capabilitie
       status: result.status,
       target: { type: "tool_call", name: input.request.event.tool?.name ?? input.request.event.eventName },
       evidence: result.evidence ?? [],
-      details: { pluginId: manifest.id },
+      details: {
+        pluginId: manifest.id,
+        contextMode: config.contextMode,
+        contextualReason: contextual?.reason,
+      },
       correlationKeys: ["blast-radius", `tool:${input.request.event.tool?.name ?? "unknown"}`]
     });
   }
@@ -56,7 +81,13 @@ export async function runBlastRadius(input: EvaluationPipelineInput, capabilitie
         status: "observed",
         target: { type: "tool_call", name: input.request.event.tool?.name ?? input.request.event.eventName },
         evidence: primaryMatch.evidence,
-        details: { pluginId: manifest.id, configuredAction: "allow" },
+        details: {
+          pluginId: manifest.id,
+          configuredAction: contextual?.allowWithoutAsking ? "ask" : "allow",
+          contextMode: config.contextMode,
+          contextuallyAllowed: Boolean(contextual?.allowWithoutAsking),
+          contextualReason: contextual?.reason,
+        },
         correlationKeys: ["blast-radius", `tool:${input.request.event.tool?.name ?? "unknown"}`]
       });
     }
@@ -99,7 +130,11 @@ export async function runBlastRadius(input: EvaluationPipelineInput, capabilitie
         severity: result.severity,
         summary: result.explanation,
         evidence: result.evidence
-      }))
+      })),
+      metadata: {
+        contextMode: config.contextMode,
+        contextual,
+      },
     })
   };
 }
@@ -224,10 +259,15 @@ function isDisplayOnlyShellCommand(command: string) {
 function pluginConfig(config: Record<string, unknown> | undefined) {
   const action = (value: unknown, fallback: "allow" | "ask" | "block") => value === "allow" || value === "ask" || value === "block" ? value : fallback;
   return {
+    contextMode: contextMode(config?.contextMode),
     destructiveAction: action(config?.destructiveAction, "ask"),
     databaseMutationAction: action(config?.databaseMutationAction, "ask"),
     broadFilesystemAction: action(config?.broadFilesystemAction, "ask")
   };
+}
+
+function isInherentlyBroadDestruction(text: string) {
+  return /\brm\s+-[a-z]*r[a-z]*\s+(?:-[^\s]+\s+)*(?:\/(?=$|[\s"';&|])|~(?=$|[\s"';&|])|\$HOME\b|\*)|\bterraform\s+destroy\b(?![^\n;&]*\s-target(?:=|\s))|\b(?:drop|truncate)\s+(?:database|schema)\b|\b(?:delete|remove|erase|wipe|purge|drop|truncate)\b[^\n]{0,100}\b(?:all|every)\b/i.test(text);
 }
 
 function snippets(text: string, patterns: RegExp[]) {

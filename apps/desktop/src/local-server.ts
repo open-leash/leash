@@ -905,15 +905,18 @@ export class LocalOpenLeashServer {
           agentId?: string;
           sessionId?: string;
           projectPath?: string;
+          prompt?: string;
+          transcript?: Array<{ role?: string; content?: string; at?: string }>;
           requestBody?: Record<string, unknown>;
         };
-        if (!body.requestBody || typeof body.requestBody !== "object" || Array.isArray(body.requestBody)) {
-          return json(res, { error: "requestBody must be a JSON object" }, 400);
+        const legacyRequest = body.requestBody && typeof body.requestBody === "object" && !Array.isArray(body.requestBody);
+        if (!legacyRequest && typeof body.prompt !== "string") {
+          return json(res, { error: "prompt or requestBody is required" }, 400);
         }
         if (this.isMonitoringExcluded(body.agentKind, body.sessionId, body.projectPath)) {
           return json(res, {
             protocol: "openleash-container-plugin.v1",
-            requestBody: body.requestBody,
+            ...(legacyRequest ? { requestBody: body.requestBody } : { finalPrompt: body.prompt }),
             appliedPluginIds: [],
             runs: [],
             monitoringPaused: true,
@@ -924,7 +927,7 @@ export class LocalOpenLeashServer {
         if (pause) {
           return json(res, {
             protocol: "openleash-container-plugin.v1",
-            requestBody: body.requestBody,
+            ...(legacyRequest ? { requestBody: body.requestBody } : { finalPrompt: body.prompt }),
             appliedPluginIds: [],
             runs: [],
             monitoringPaused: true,
@@ -964,7 +967,7 @@ export class LocalOpenLeashServer {
       }
       const hookMatch = req.url?.match(/^\/v1\/hooks\/([^/?]+)\/([^/?]+)(?:\?.*)?$/);
       if (req.method === "POST" && hookMatch) {
-        const body = await readJson(req);
+        const body = enrichHookBodyWithTranscript(await readJson(req));
         const request = normalizeHookRequest(hookMatch[1], hookMatch[2], body, req.url ?? "");
         if (isBackgroundControlPrompt(request.agent.kind, request.event.prompt)) {
           return json(res, nativeHookDecision(
@@ -1013,7 +1016,9 @@ export class LocalOpenLeashServer {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     } catch (error) {
-      const status = error instanceof RemoteApiError ? error.status : 500;
+      const status = error instanceof RemoteApiError
+        ? error.status
+        : error instanceof RequestBodyTooLargeError ? 413 : 500;
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : "unknown error" }));
     }
@@ -3110,15 +3115,25 @@ function agentEventScope(value: unknown) {
 async function readJson(req: http.IncomingMessage) {
   const chunks: Buffer[] = [];
   let size = 0;
-  const limit = Number(process.env.OPENLEASH_DESKTOP_EDGE_MAX_BODY_BYTES ?? 20 * 1024 * 1024);
+  const configuredLimit = Number(process.env.OPENLEASH_DESKTOP_EDGE_MAX_BODY_BYTES);
+  const limit = Number.isFinite(configuredLimit) && configuredLimit > 0
+    ? configuredLimit
+    : 20 * 1024 * 1024;
   for await (const chunk of req) {
     const buffer = Buffer.from(chunk);
     size += buffer.length;
-    if (size > limit) throw new Error(`request body exceeds ${limit} bytes`);
+    if (size > limit) throw new RequestBodyTooLargeError(limit);
     chunks.push(buffer);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : {};
+}
+
+class RequestBodyTooLargeError extends Error {
+  constructor(readonly limit: number) {
+    super(`request body exceeds ${limit} bytes`);
+    this.name = "RequestBodyTooLargeError";
+  }
 }
 
 function normalizeHookRequest(agent: string, eventName: string, raw: any, url: string): EvaluationRequest {
@@ -3152,6 +3167,72 @@ function normalizeHookRequest(agent: string, eventName: string, raw: any, url: s
       occurredAt: new Date().toISOString()
     }
   };
+}
+
+export function enrichHookBodyWithTranscript(
+  value: unknown,
+  claudeProjects = path.join(os.homedir(), ".claude", "projects"),
+) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const body = value as Record<string, unknown>;
+  if (Array.isArray(body.transcript) && body.transcript.length > 0) return value;
+  const filePath = typeof body.transcript_path === "string"
+    ? body.transcript_path
+    : typeof body.transcriptPath === "string" ? body.transcriptPath : undefined;
+  if (!filePath) return value;
+  const resolved = path.resolve(filePath);
+  const relative = path.relative(claudeProjects, resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return value;
+  try {
+    const transcript = fs.readFileSync(resolved, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .flatMap(localClaudeTranscriptTurn)
+      .slice(-20);
+    return transcript.length > 0 ? { ...body, transcript } : value;
+  } catch {
+    return value;
+  }
+}
+
+function localClaudeTranscriptTurn(line: string): Array<{ role: "user" | "assistant"; content: string; at?: string }> {
+  try {
+    const record = JSON.parse(line) as {
+      type?: unknown;
+      timestamp?: unknown;
+      message?: { role?: unknown; content?: unknown };
+    };
+    const role = typeof record.message?.role === "string" ? record.message.role : record.type;
+    if (role !== "user" && role !== "assistant") return [];
+    const content = localTranscriptContent(record.message?.content).slice(0, 4_000);
+    if (!content || localTranscriptNoise(content)) return [];
+    return [{
+      role,
+      content,
+      ...(typeof record.timestamp === "string" ? { at: record.timestamp } : {}),
+    }];
+  } catch {
+    return [];
+  }
+}
+
+function localTranscriptContent(value: unknown) {
+  if (typeof value === "string") return value.trim();
+  if (!Array.isArray(value)) return "";
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as { type?: unknown; text?: unknown };
+    if (record.type === "text" && typeof record.text === "string") return [record.text];
+    return [];
+  }).join("\n").trim();
+}
+
+function localTranscriptNoise(value: string) {
+  const normalized = value.trim();
+  return normalized.startsWith("Operation stopped by hook:")
+    || normalized.startsWith("<system-reminder>")
+    || normalized.startsWith("Caveat:")
+    || normalized.includes("<local-command-stdout>");
 }
 
 function hookAgentMetadata(agent: string) {
@@ -3306,15 +3387,17 @@ function backendUnavailableProxyDecision() {
 }
 
 function backendUnavailableTransformDecision(body: unknown) {
-  const requestBody = body && typeof body === "object" && !Array.isArray(body)
-    ? (body as { requestBody?: unknown }).requestBody
+  const envelope = body && typeof body === "object" && !Array.isArray(body)
+    ? body as { requestBody?: unknown; prompt?: unknown }
     : undefined;
+  const requestBody = envelope?.requestBody;
+  const prompt = envelope?.prompt;
+  const legacyRequest = requestBody && typeof requestBody === "object" && !Array.isArray(requestBody);
   return {
     protocol: "openleash-container-plugin.v1",
-    requestBody:
-      requestBody && typeof requestBody === "object" && !Array.isArray(requestBody)
-        ? requestBody
-        : {},
+    ...(legacyRequest
+      ? { requestBody }
+      : { finalPrompt: typeof prompt === "string" ? prompt : "" }),
     appliedPluginIds: [],
     runs: [],
     monitoringPaused: true,

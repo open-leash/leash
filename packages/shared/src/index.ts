@@ -353,10 +353,10 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
     name: LEASH_FEATURE_PRESENTATIONS["data-leakage-prevention"].name,
     description: LEASH_FEATURE_PRESENTATIONS["data-leakage-prevention"].description,
     repositoryUrl: "https://github.com/open-leash/plugin-data-leakage-prevention",
-    version: "1.0.0",
+    version: "1.1.0",
     publisher: "openleash",
     runtime: "builtin",
-    execution: firstPartyFeature("data-leakage-prevention", "1.0.0"),
+    execution: firstPartyFeature("data-leakage-prevention", "1.1.0"),
     entrypoint: "client-api",
     events: ["prompt.beforeSubmit"],
     permissions: ["event:read", "prompt:read", "prompt:write", "decision:write", "model:invoke", "audit:write", "signal:write"],
@@ -367,6 +367,7 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean" },
+        contextMode: { enum: ["goal-aware", "strict"] },
         action: { enum: ["allow", "ask", "block"] },
         categories: {
           type: "array",
@@ -377,6 +378,7 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
     },
     defaultConfig: {
       enabled: true,
+      contextMode: "goal-aware",
       action: "ask",
       categories: ["pii", "phi", "tokens", "keys", "credentials"]
     },
@@ -388,13 +390,13 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
     name: LEASH_FEATURE_PRESENTATIONS["sensitive-access"].name,
     description: LEASH_FEATURE_PRESENTATIONS["sensitive-access"].description,
     repositoryUrl: "https://github.com/open-leash/plugin-sensitive-access",
-    version: "1.0.0",
+    version: "1.1.0",
     publisher: "openleash",
     runtime: "builtin",
-    execution: firstPartyFeature("sensitive-access", "1.0.0"),
+    execution: firstPartyFeature("sensitive-access", "1.1.0"),
     entrypoint: "client-api",
     events: ["prompt.beforeSubmit", "agent.response", "tool.beforeUse", "tool.afterUse"],
-    permissions: ["event:read", "prompt:read", "tool:read", "model:invoke", "decision:write", "audit:write", "log:write", "signal:write"],
+    permissions: ["event:read", "prompt:read", "tool:read", "conversation:read", "model:invoke", "decision:write", "audit:write", "log:write", "signal:write"],
     effects: ["observe", "ask", "deny"],
     ordering: { priority: 180, before: ["openleash.dlp", "openleash.blast-radius", "openleash.rules-enforcer"] },
     configSchema: {
@@ -402,6 +404,7 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean" },
+        contextMode: { enum: ["goal-aware", "strict"] },
         secretFileAction: { enum: ["allow", "ask", "block"] },
         envDumpAction: { enum: ["allow", "ask", "block"] },
         exfiltrationAction: { enum: ["allow", "ask", "block"] }
@@ -409,6 +412,7 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
     },
     defaultConfig: {
       enabled: true,
+      contextMode: "goal-aware",
       secretFileAction: "ask",
       envDumpAction: "ask",
       exfiltrationAction: "block"
@@ -421,13 +425,13 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
     name: LEASH_FEATURE_PRESENTATIONS["blast-radius"].name,
     description: LEASH_FEATURE_PRESENTATIONS["blast-radius"].description,
     repositoryUrl: "https://github.com/open-leash/plugin-blast-radius",
-    version: "1.0.3",
+    version: "1.1.0",
     publisher: "openleash",
     runtime: "builtin",
-    execution: firstPartyFeature("blast-radius", "1.0.3"),
+    execution: firstPartyFeature("blast-radius", "1.1.0"),
     entrypoint: "client-api",
     events: ["prompt.beforeSubmit", "tool.beforeUse"],
-    permissions: ["event:read", "prompt:read", "tool:read", "decision:write", "audit:write", "log:write", "signal:write", "island:publish"],
+    permissions: ["event:read", "prompt:read", "tool:read", "conversation:read", "model:invoke", "decision:write", "audit:write", "log:write", "signal:write", "island:publish"],
     effects: ["observe", "ask", "deny"],
     ordering: { priority: 220, before: ["openleash.rules-enforcer", "openleash.mcp-scanner"] },
     configSchema: {
@@ -435,6 +439,7 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean" },
+        contextMode: { enum: ["goal-aware", "strict"] },
         destructiveAction: { enum: ["allow", "ask", "block"] },
         databaseMutationAction: { enum: ["allow", "ask", "block"] },
         broadFilesystemAction: { enum: ["allow", "ask", "block"] }
@@ -442,6 +447,7 @@ export const FIRST_PARTY_PLUGIN_MANIFESTS = [
     },
     defaultConfig: {
       enabled: true,
+      contextMode: "goal-aware",
       destructiveAction: "ask",
       databaseMutationAction: "ask",
       broadFilesystemAction: "ask"
@@ -570,6 +576,7 @@ export type PluginDlpConfig = {
   action: PluginDlpAction;
   categories: PluginDlpCategory[];
   model: string;
+  contextMode?: "goal-aware" | "strict";
 };
 
 export type PluginPromptPipelineConfig = {

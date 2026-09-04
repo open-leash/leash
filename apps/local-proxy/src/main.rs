@@ -136,10 +136,12 @@ struct Decision {
     #[serde(rename = "finalPrompt")]
     final_prompt: Option<String>,
 }
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct TransformDecision {
-    #[serde(rename = "requestBody")]
-    request_body: Value,
+    #[serde(rename = "requestBody", default)]
+    request_body: Option<Value>,
+    #[serde(rename = "finalPrompt", default)]
+    final_prompt: Option<String>,
     #[serde(rename = "appliedPluginIds", default)]
     applied_plugin_ids: Vec<String>,
     #[serde(default)]
@@ -249,6 +251,13 @@ fn availability_bypass_allowed(config: &Config, error: &reqwest::Error) -> bool 
     error
         .status()
         .is_some_and(|status| is_availability_status(status.as_u16()))
+}
+
+fn protection_error_status(error: &reqwest::Error) -> StatusCode {
+    match error.status() {
+        Some(StatusCode::PAYLOAD_TOO_LARGE) => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 fn is_availability_status(status: u16) -> bool {
@@ -393,9 +402,17 @@ async fn forward(
         .await;
         match transformation {
             Ok(Ok(result)) => {
-                if result.request_body != value {
-                    value = result.request_body;
-                    transformed = true;
+                if let Some(request_body) = result.request_body {
+                    if request_body != value {
+                        value = request_body;
+                        transformed = true;
+                    }
+                }
+                if let Some(prompt) = result.final_prompt {
+                    if latest_prompt(&value).as_deref() != Some(prompt.as_str()) {
+                        replace_latest_prompt(&mut value, &prompt);
+                        transformed = true;
+                    }
                 }
                 applied_plugin_ids = result.applied_plugin_ids;
                 container_plugin_runs = result.runs;
@@ -403,8 +420,8 @@ async fn forward(
             }
             Ok(Err(error)) if !availability_bypass_allowed(&app.config, &error) => {
                 return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("Leash Feature runtime unavailable: {error}"),
+                    protection_error_status(&error),
+                    format!("Leash Feature runtime rejected the request: {error}"),
                 ));
             }
             Ok(Err(_)) => {
@@ -451,8 +468,8 @@ async fn forward(
                 }
                 Ok(Err(error)) if !availability_bypass_allowed(&app.config, &error) => {
                     return Err((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("Leash backend unavailable: {error}"),
+                        protection_error_status(&error),
+                        format!("Leash backend rejected the request: {error}"),
                     ))
                 }
                 Ok(Err(_)) => {
@@ -545,8 +562,8 @@ async fn forward(
                 }
                 Ok(Err(error)) if !availability_bypass_allowed(&app.config, &error) => {
                     return Err((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("Leash tool evaluation unavailable: {error}"),
+                        protection_error_status(&error),
+                        format!("Leash tool evaluation rejected the request: {error}"),
                     ))
                 }
                 Ok(Err(_)) => {
@@ -1252,8 +1269,12 @@ async fn transform_request(
     body: &Value,
     agent_kind: &str,
 ) -> Result<TransformDecision, reqwest::Error> {
+    let Some(prompt) = latest_prompt(body) else {
+        return Ok(TransformDecision::default());
+    };
     let session_id = provider_session_id(body).unwrap_or_else(|| "proxy".to_owned());
     let project_path = provider_project_path(body);
+    let transcript = normalized_transcript(body);
     app.client
         .post(format!(
             "{}/v1/plugin-runtime/transform",
@@ -1265,7 +1286,8 @@ async fn transform_request(
             "agentKind": agent_kind,
             "sessionId": session_id,
             "projectPath": project_path,
-            "requestBody": body,
+            "prompt": prompt,
+            "transcript": transcript,
         }))
         .send()
         .await?
@@ -1376,16 +1398,19 @@ fn request_event(body: &Value) -> (&'static str, Option<Value>) {
     ("UserPromptSubmit", None)
 }
 
+const MAX_CONTEXT_TURNS: usize = 12;
+const MAX_CONTEXT_TURN_BYTES: usize = 16 * 1024;
+
 fn normalized_transcript(body: &Value) -> Vec<Value> {
     let mut turns = Vec::new();
     if let Some(system) = body.get("system") {
-        let text = content_text(system);
+        let text = bounded_context_text(content_text(system));
         if !text.is_empty() {
             turns.push(json!({"role":"system","content":text}));
         }
     }
     if let Some(messages) = body.get("messages").and_then(Value::as_array) {
-        for message in messages {
+        for message in selected_context_items(messages) {
             let role = match message
                 .get("role")
                 .and_then(Value::as_str)
@@ -1396,14 +1421,15 @@ fn normalized_transcript(body: &Value) -> Vec<Value> {
                 "tool" => "tool",
                 _ => "user",
             };
-            let text = content_text(message.get("content").unwrap_or(&Value::Null));
+            let text =
+                bounded_context_text(content_text(message.get("content").unwrap_or(&Value::Null)));
             if !text.is_empty() {
                 turns.push(json!({"role":role,"content":text}));
             }
         }
     } else if let Some(input) = body.get("input") {
         if let Some(items) = input.as_array() {
-            for item in items {
+            for item in selected_context_items(items) {
                 let kind = item
                     .get("type")
                     .and_then(Value::as_str)
@@ -1415,19 +1441,44 @@ fn normalized_transcript(body: &Value) -> Vec<Value> {
                         "user"
                     },
                 );
-                let text = response_item_text(item);
+                let text = bounded_context_text(response_item_text(item));
                 if !text.is_empty() {
                     turns.push(json!({"role":role,"content":text}));
                 }
             }
         } else {
-            let text = content_text(input);
+            let text = bounded_context_text(content_text(input));
             if !text.is_empty() {
                 turns.push(json!({"role":"user","content":text}));
             }
         }
     }
     turns
+}
+
+fn selected_context_items(items: &[Value]) -> Vec<&Value> {
+    if items.len() <= MAX_CONTEXT_TURNS {
+        return items.iter().collect();
+    }
+    let recent_start = items.len() - (MAX_CONTEXT_TURNS - 1);
+    std::iter::once(&items[0])
+        .chain(items[recent_start..].iter())
+        .collect()
+}
+
+fn bounded_context_text(text: String) -> String {
+    if text.len() <= MAX_CONTEXT_TURN_BYTES {
+        return text;
+    }
+    const MARKER: &str = "\n…[truncated by Leash]";
+    let target = MAX_CONTEXT_TURN_BYTES.saturating_sub(MARKER.len());
+    let boundary = text
+        .char_indices()
+        .take_while(|(index, _)| *index <= target)
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0);
+    format!("{}{}", &text[..boundary], MARKER)
 }
 
 fn response_item_text(item: &Value) -> String {
@@ -1879,7 +1930,7 @@ mod tests {
         .unwrap();
         assert!(decision.monitoring_paused);
         assert_eq!(
-            provider_session_id(&decision.request_body).as_deref(),
+            provider_session_id(decision.request_body.as_ref().unwrap()).as_deref(),
             Some("conversation-1"),
         );
     }
@@ -1889,6 +1940,26 @@ mod tests {
         let t = normalized_transcript(&v);
         assert_eq!(t.len(), 2);
         assert!(t[0]["content"].as_str().unwrap().contains("Read"));
+    }
+    #[test]
+    fn bounds_provider_context_while_preserving_goal_and_recent_turns() {
+        let messages = (0..30)
+            .map(|index| json!({
+                "role": if index % 2 == 0 { "user" } else { "assistant" },
+                "content": if index == 29 { "latest".to_owned() } else { format!("turn-{index}") },
+            }))
+            .collect::<Vec<_>>();
+        let transcript = normalized_transcript(&json!({"messages": messages}));
+        assert_eq!(transcript.len(), MAX_CONTEXT_TURNS);
+        assert_eq!(transcript[0]["content"], "turn-0");
+        assert_eq!(transcript.last().unwrap()["content"], "latest");
+
+        let oversized = normalized_transcript(&json!({
+            "messages": [{"role": "user", "content": "é".repeat(MAX_CONTEXT_TURN_BYTES)}],
+        }));
+        let content = oversized[0]["content"].as_str().unwrap();
+        assert!(content.len() <= MAX_CONTEXT_TURN_BYTES);
+        assert!(content.ends_with("[truncated by Leash]"));
     }
     #[test]
     fn parses_split_provider_sse_payloads() {

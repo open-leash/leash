@@ -1,6 +1,7 @@
-import type { PluginCapabilities, PluginDlpCategory, PluginDlpConfig } from "@openleash/shared";
+import type { ConversationTurn, PluginCapabilities, PluginDlpCategory, PluginDlpConfig } from "@openleash/shared";
 import { dlpManifest as manifest } from "./manifest.js";
 import { pluginRun, type PromptPipelineResult } from "../types.js";
+import { contextMode } from "../contextual-necessity.js";
 
 export { manifest };
 
@@ -22,18 +23,24 @@ type DlpLlmResult = {
   maskedText: string;
   recommendation: "allow" | "mask" | "block";
   explanation: string;
+  necessaryForUserGoal: boolean;
+  minimalScope: boolean;
+  safeToShareWithAgent: boolean;
+  confidence: "low" | "medium" | "high";
 };
 
 export async function runDlp({
   prompt,
   config,
   capabilities,
-  startedAt
+  startedAt,
+  recentTranscript,
 }: {
   prompt: string;
   config: PluginDlpConfig;
   capabilities: PluginCapabilities;
   startedAt: number;
+  recentTranscript?: ConversationTurn[];
 }) {
   if (!config.enabled) {
     return {
@@ -49,7 +56,7 @@ export async function runDlp({
     };
   }
 
-  const inspected = await inspectPrompt(prompt, config, capabilities);
+  const inspected = await inspectPrompt(prompt, config, capabilities, recentTranscript);
   const dlp: NonNullable<PromptPipelineResult["dlp"]> = {
     enabled: true,
     action: config.action,
@@ -58,7 +65,7 @@ export async function runDlp({
     findings: inspected.findings,
     masked: inspected.masked
   };
-  const summary = dlpSummary(dlp, inspected.blocked);
+  const summary = dlpSummary(dlp, inspected.blocked, inspected.requiresApproval);
   if (inspected.matched) {
     await capabilities.signals.emit({
       kind: "secret.detected",
@@ -76,7 +83,9 @@ export async function runDlp({
       details: {
         categories: inspected.categories,
         action: config.action,
-        model: inspected.model
+        model: inspected.model,
+        contextMode: contextMode(config.contextMode),
+        contextuallyAllowed: inspected.matched && config.action === "ask" && !inspected.requiresApproval,
       },
       correlationKeys: inspected.categories.map((category) => `dlp:${category}`)
     });
@@ -113,12 +122,20 @@ export async function runDlp({
   };
 }
 
-async function inspectPrompt(prompt: string, config: PluginDlpConfig, capabilities: PluginCapabilities): Promise<DlpInspection> {
+async function inspectPrompt(
+  prompt: string,
+  config: PluginDlpConfig,
+  capabilities: PluginCapabilities,
+  recentTranscript?: ConversationTurn[],
+): Promise<DlpInspection> {
   const heuristic = heuristicDlp(prompt, config);
   // A routine prompt should never depend on a remote evaluator. Besides making
   // the common path faster, this prevents an evaluator outage from turning a
   // harmless prompt into a spurious approval request.
   if (!heuristic.matched) return heuristic;
+  // Strict mode intentionally avoids a model round trip: every deterministic
+  // match receives the configured approval request immediately.
+  if (config.action === "ask" && contextMode(config.contextMode) === "strict") return heuristic;
 
   const llm = await capabilities.llm.evaluateJson<DlpLlmResult>({
     purpose: "data-leakage-prevention",
@@ -127,12 +144,16 @@ async function inspectPrompt(prompt: string, config: PluginDlpConfig, capabiliti
       action: config.action,
       categories: config.categories,
       text: prompt,
-      heuristicFindings: heuristic.findings
+      heuristicFindings: heuristic.findings,
+      recentTranscript: recentTranscript?.slice(-8).map((turn) => ({
+        role: turn.role,
+        content: redactContext(turn.content).slice(0, 1_200),
+      })),
     }),
     schema: {
       type: "object",
       additionalProperties: false,
-      required: ["matched", "categories", "findings", "maskedText", "recommendation", "explanation"],
+      required: ["matched", "categories", "findings", "maskedText", "recommendation", "explanation", "necessaryForUserGoal", "minimalScope", "safeToShareWithAgent", "confidence"],
       properties: {
         matched: { type: "boolean" },
         categories: { type: "array", items: { type: "string", enum: ["pii", "phi", "tokens", "keys", "credentials"] } },
@@ -151,7 +172,11 @@ async function inspectPrompt(prompt: string, config: PluginDlpConfig, capabiliti
         },
         maskedText: { type: "string" },
         recommendation: { type: "string", enum: ["allow", "mask", "block"] },
-        explanation: { type: "string" }
+        explanation: { type: "string" },
+        necessaryForUserGoal: { type: "boolean" },
+        minimalScope: { type: "boolean" },
+        safeToShareWithAgent: { type: "boolean" },
+        confidence: { type: "string", enum: ["low", "medium", "high"] }
       }
     },
     temperature: 0,
@@ -162,7 +187,16 @@ async function inspectPrompt(prompt: string, config: PluginDlpConfig, capabiliti
   const categories = [...new Set(findings.map((finding) => finding.category))];
   const matched = heuristic.matched || Boolean(llm?.json?.matched) || findings.length > 0;
   const blocked = config.action === "block" && matched;
-  const requiresApproval = config.action === "ask" && matched;
+  const contextuallyAllowed = config.action === "ask"
+    && contextMode(config.contextMode) === "goal-aware"
+    && categories.length > 0
+    && categories.every((category) => category === "pii")
+    && llm?.json?.necessaryForUserGoal === true
+    && llm.json.minimalScope === true
+    && llm.json.safeToShareWithAgent === true
+    && llm.json.confidence === "high"
+    && llm.json.recommendation === "allow";
+  const requiresApproval = config.action === "ask" && matched && !contextuallyAllowed;
   const llmMasked = typeof llm?.json?.maskedText === "string" && llm.json.maskedText.trim() ? llm.json.maskedText : "";
   const maskedText = config.action === "mask"
     ? usefulMaskedText(prompt, llmMasked) ? llmMasked : maskWithFindings(heuristic.prompt, findings)
@@ -185,6 +219,8 @@ function dlpSystemPrompt(config: PluginDlpConfig) {
     "You are the data-leakage-prevention OpenLeash plugin.",
     "Inspect the text for only these enabled categories: " + config.categories.join(", ") + ".",
     "Detect actual sensitive values, not generic discussion of security.",
+    "When action is ask, decide whether interrupting is needed in context. Allow without asking only when the value is clearly necessary for the user's current goal, minimally scoped, safe to share with this agent, and confidence is high.",
+    "Private keys, authentication tokens, passwords, bulk personal data, and health data are never safe to share without asking.",
     "If masking, replace only sensitive values with stable placeholders such as [TOKEN_MASKED], [EMAIL_MASKED], [PRIVATE_KEY_MASKED], [CREDENTIAL_MASKED], [PHI_MASKED]. Preserve the rest of the text.",
     "Return JSON only."
   ].join("\n");
@@ -267,11 +303,19 @@ function isDlpCategory(value: unknown): value is PluginDlpCategory {
   return value === "pii" || value === "phi" || value === "tokens" || value === "keys" || value === "credentials";
 }
 
-function dlpSummary(dlp: NonNullable<PromptPipelineResult["dlp"]>, blocked: boolean) {
+function redactContext(value: string) {
+  return value
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[PRIVATE_KEY_REDACTED]")
+    .replace(/\b(?:sk|pk)-(?:proj-)?[A-Za-z0-9_-]{12,}\b/g, "[TOKEN_REDACTED]")
+    .replace(/\b(password|passwd|secret|api[_-]?key|access[_-]?key|client[_-]?secret|token)\s*[:=]\s*['"]?[^'"\s,}]{6,}/gi, "$1=[VALUE_REDACTED]");
+}
+
+function dlpSummary(dlp: NonNullable<PromptPipelineResult["dlp"]>, blocked: boolean, requiresApproval: boolean) {
   if (!dlp.matched) return "DLP checked with no sensitive data detected.";
   const categories = dlp.categories.join(", ") || "sensitive data";
   if (blocked) return `DLP blocked prompt submission: ${categories}.`;
-  if (dlp.action === "ask") return `DLP paused the prompt for your approval: ${categories}.`;
+  if (dlp.action === "ask" && requiresApproval) return `DLP paused the prompt for your approval: ${categories}.`;
+  if (dlp.action === "ask") return `DLP confirmed ${categories} was needed for this task and let the prompt continue.`;
   if (dlp.masked) return `DLP masked ${categories}.`;
   return `DLP detected ${categories}.`;
 }

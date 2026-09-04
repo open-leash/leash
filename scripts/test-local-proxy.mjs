@@ -10,14 +10,25 @@ const availabilityProxyPort = 19421;
 let captured;
 let capturedApi;
 const apiEvents = [];
+const transformRequests = [];
 
 const api = http.createServer(async (req, res) => {
-  const body = JSON.parse((await read(req)).toString() || "{}");
+  const raw = await read(req);
+  const body = JSON.parse(raw.toString() || "{}");
   if (req.url === "/v1/plugin-runtime/transform") {
+    transformRequests.push({ body, bytes: raw.length });
+    if (body.prompt === "TRANSFORM_TOO_LARGE") {
+      res.statusCode = 413;
+      return res.end("feature payload too large");
+    }
+    if (body.prompt === "compact-transform" && raw.length > 2_500) {
+      res.statusCode = 413;
+      return res.end("legacy transform envelope would be too large");
+    }
     res.setHeader("content-type", "application/json");
     return res.end(JSON.stringify({
       protocol: "openleash-container-plugin.v1",
-      requestBody: body.requestBody,
+      finalPrompt: body.prompt,
       appliedPluginIds: [],
       runs: [],
     }));
@@ -267,8 +278,8 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(
     apiEvents.some((event) => event.request?.event?.prompt === titlePrompt),
-    true,
-    "Claude title generation must still pass through policy enforcement",
+    false,
+    "Claude title generation must not create policy activity or user-facing sounds",
   );
   assert.equal(
     JSON.parse(captured.bytes.toString()).messages[0].content,
@@ -337,20 +348,13 @@ try {
   );
   assert.equal(response.status, 200);
   await response.text();
-  await waitFor(() =>
-    apiEvents.some(
-      (event) =>
-        event.request?.event?.prompt === codexTitlePrompt &&
-        event.request?.event?.raw?.backgroundControl === true,
-    ),
-  );
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(
     apiEvents.filter(
       (event) => event.request?.event?.prompt === codexTitlePrompt,
     ).length,
-    codexTitleEventCount + 1,
-    "Codex title generation must not emit response activity telemetry",
+    codexTitleEventCount,
+    "Codex title generation must not emit policy or response activity telemetry",
   );
 
   response = await fetch(
@@ -541,6 +545,33 @@ try {
     "rewritten prompt",
   );
 
+  const longConversation = Array.from({ length: 30 }, (_, index) => ({
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `turn-${index}-${"x".repeat(70)}`,
+  }));
+  longConversation.push({ role: "user", content: "compact-transform" });
+  response = await fetch(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "test", messages: longConversation }),
+  });
+  assert.equal(response.status, 200, "large conversation context must use the compact transform protocol");
+  await response.text();
+  const compactTransform = transformRequests.find((item) => item.body.prompt === "compact-transform");
+  assert.ok(compactTransform);
+  assert.equal(compactTransform.body.requestBody, undefined);
+  assert.equal(compactTransform.body.transcript.length, 12);
+  assert.equal(compactTransform.body.transcript[0].content.startsWith("turn-0-"), true);
+  assert.equal(compactTransform.body.transcript.at(-1).content, "compact-transform");
+  assert.ok(compactTransform.bytes < 2_500);
+
+  response = await fetch(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "TRANSFORM_TOO_LARGE" }] }),
+  });
+  assert.equal(response.status, 413, "feature runtime payload errors must not be mislabeled as retryable 503s");
+
   response = await fetch(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -556,8 +587,8 @@ try {
 
   response = await fetch(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
     method: "POST",
-    headers: { "content-type": "application/json", "content-length": "600" },
-    body: "x".repeat(600),
+    headers: { "content-type": "application/json", "content-length": "5000" },
+    body: "x".repeat(5_000),
   });
   assert.equal(response.status, 413);
 
@@ -643,7 +674,7 @@ function spawnProxy(port, failOpen) {
         OPENLEASH_OPENAI_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
         OPENLEASH_ANTHROPIC_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
         OPENLEASH_PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-        OPENLEASH_PROXY_MAX_BODY_BYTES: "512",
+        OPENLEASH_PROXY_MAX_BODY_BYTES: "4096",
         OPENLEASH_PROXY_MAX_GATED_RESPONSE_BYTES: "2048",
         OPENLEASH_PROXY_MAX_CONCURRENT_GATES: "1",
         OPENLEASH_PROXY_EVALUATION_TIMEOUT_SECONDS: "1",

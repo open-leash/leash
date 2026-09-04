@@ -70,6 +70,26 @@ test("locked organization settings ignore user profiles", () => {
   assert.deepEqual(resolved.effectiveProfileIds, []);
 });
 
+test("personal and locked CISO profiles resolve contextual approval mode correctly", () => {
+  const personal = resolvePluginSettingProfiles({
+    enabled: true,
+    config: { contextMode: "goal-aware" },
+    userProfiles: [{ id: "strict", name: "Strict", agentKinds: ["codex"], config: { contextMode: "strict" } }],
+    agentKind: "codex",
+  });
+  assert.equal(personal.config.contextMode, "strict");
+
+  const cisoLocked = resolvePluginSettingProfiles({
+    enabled: true,
+    config: { contextMode: "strict" },
+    userProfiles: [{ id: "relax", name: "Relax", agentKinds: ["codex"], config: { contextMode: "goal-aware" } }],
+    agentKind: "codex",
+    configLocked: true,
+  });
+  assert.equal(cisoLocked.config.contextMode, "strict");
+  assert.deepEqual(cisoLocked.effectiveProfileIds, []);
+});
+
 test("mandatory plugins allow employee config freedom without allowing an agent-level disable", () => {
   const resolved = resolvePluginSettingProfiles({
     enabled: true,

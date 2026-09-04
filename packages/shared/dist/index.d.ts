@@ -215,6 +215,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
                 type: string;
                 minimum: number;
             };
+            contextMode?: undefined;
             action?: undefined;
             categories?: undefined;
             secretFileAction?: undefined;
@@ -235,6 +236,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
         ccrEnabled: boolean;
         ccrTtlSeconds: number;
         suspiciousRiskThreshold?: undefined;
+        contextMode?: undefined;
         action?: undefined;
         categories?: undefined;
         secretFileAction?: undefined;
@@ -275,6 +277,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
         protectRecent?: undefined;
         ccrEnabled?: undefined;
         ccrTtlSeconds?: undefined;
+        contextMode?: undefined;
         action?: undefined;
         categories?: undefined;
         secretFileAction?: undefined;
@@ -314,6 +317,9 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
             enabled: {
                 type: string;
             };
+            contextMode: {
+                enum: string[];
+            };
             action: {
                 enum: string[];
             };
@@ -343,6 +349,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
     };
     defaultConfig: {
         enabled: boolean;
+        contextMode: string;
         action: string;
         categories: string[];
         level?: undefined;
@@ -374,7 +381,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
     execution: PluginInProcessExecution;
     entrypoint: string;
     events: ("prompt.beforeSubmit" | "agent.response" | "tool.beforeUse" | "tool.afterUse")[];
-    permissions: ("event:read" | "prompt:read" | "tool:read" | "decision:write" | "model:invoke" | "audit:write" | "log:write" | "signal:write")[];
+    permissions: ("event:read" | "prompt:read" | "tool:read" | "decision:write" | "model:invoke" | "conversation:read" | "audit:write" | "log:write" | "signal:write")[];
     effects: ("observe" | "ask" | "deny")[];
     ordering: {
         priority: number;
@@ -387,6 +394,9 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
         properties: {
             enabled: {
                 type: string;
+            };
+            contextMode: {
+                enum: string[];
             };
             secretFileAction: {
                 enum: string[];
@@ -414,6 +424,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
     };
     defaultConfig: {
         enabled: boolean;
+        contextMode: string;
         secretFileAction: string;
         envDumpAction: string;
         exfiltrationAction: string;
@@ -445,7 +456,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
     execution: PluginInProcessExecution;
     entrypoint: string;
     events: ("prompt.beforeSubmit" | "tool.beforeUse")[];
-    permissions: ("event:read" | "prompt:read" | "tool:read" | "decision:write" | "audit:write" | "log:write" | "signal:write" | "island:publish")[];
+    permissions: ("event:read" | "prompt:read" | "tool:read" | "decision:write" | "model:invoke" | "conversation:read" | "audit:write" | "log:write" | "signal:write" | "island:publish")[];
     effects: ("observe" | "ask" | "deny")[];
     ordering: {
         priority: number;
@@ -458,6 +469,9 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
         properties: {
             enabled: {
                 type: string;
+            };
+            contextMode: {
+                enum: string[];
             };
             destructiveAction: {
                 enum: string[];
@@ -485,6 +499,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
     };
     defaultConfig: {
         enabled: boolean;
+        contextMode: string;
         destructiveAction: string;
         databaseMutationAction: string;
         broadFilesystemAction: string;
@@ -553,6 +568,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
             protectRecent?: undefined;
             ccrEnabled?: undefined;
             ccrTtlSeconds?: undefined;
+            contextMode?: undefined;
             action?: undefined;
             categories?: undefined;
             secretFileAction?: undefined;
@@ -573,6 +589,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
         ccrEnabled?: undefined;
         ccrTtlSeconds?: undefined;
         suspiciousRiskThreshold?: undefined;
+        contextMode?: undefined;
         action?: undefined;
         categories?: undefined;
         secretFileAction?: undefined;
@@ -613,6 +630,7 @@ export declare const FIRST_PARTY_PLUGIN_MANIFESTS: ({
         ccrEnabled?: undefined;
         ccrTtlSeconds?: undefined;
         suspiciousRiskThreshold?: undefined;
+        contextMode?: undefined;
         action?: undefined;
         categories?: undefined;
         secretFileAction?: undefined;
@@ -676,6 +694,7 @@ export type PluginDlpConfig = {
     action: PluginDlpAction;
     categories: PluginDlpCategory[];
     model: string;
+    contextMode?: "goal-aware" | "strict";
 };
 export type PluginPromptPipelineConfig = {
     compression: PluginPromptCompressionConfig;

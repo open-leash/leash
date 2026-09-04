@@ -8,6 +8,7 @@ import { runMcpScanner } from "./mcp-scanner/index.js";
 import { runPromptCompression } from "./prompt-compression/index.js";
 import { runSecurityEvaluator } from "./security-evaluator/index.js";
 import { runSensitiveAccess } from "./sensitive-access/index.js";
+import { clearContextualNecessityCacheForTests } from "./contextual-necessity.js";
 import { runSkillScanner } from "./skill-scanner/index.js";
 import { pluginsForEvent } from "./registry.js";
 import { runEvaluationPipeline, runPromptPipeline, safePluginFailureDiagnostic } from "./runtime.js";
@@ -113,6 +114,88 @@ test("DLP keeps deterministic protection when the evaluator is unavailable", asy
   assert.match(result.prompt, /\[TOKEN_MASKED\]/);
 });
 
+test("DLP goal-aware mode reuses its classification call to avoid an unnecessary question", async () => {
+  let llmCalls = 0;
+  const { cap } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    return {
+      json: {
+        matched: true,
+        categories: ["pii"],
+        findings: [{ category: "pii", quote: "alice@example.com", reason: "Email address detected." }],
+        maskedText: "Email [EMAIL_MASKED] the deployment report.",
+        recommendation: "allow",
+        explanation: "The single recipient address is required for the user's stated task.",
+        necessaryForUserGoal: true,
+        minimalScope: true,
+        safeToShareWithAgent: true,
+        confidence: "high",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never;
+  };
+  const result = await runDlp({
+    prompt: "Email alice@example.com the deployment report.",
+    config: { enabled: true, contextMode: "goal-aware", action: "ask", categories: ["pii"], model: "" },
+    capabilities: cap,
+    startedAt: Date.now(),
+    recentTranscript: [{ role: "user", content: "Send Alice the deployment report." }],
+  });
+  assert.equal(llmCalls, 1);
+  assert.equal(result.result?.requiresApproval, false);
+  assert.equal(result.run.status, "passed");
+});
+
+test("DLP strict mode asks on a deterministic match without an evaluator call", async () => {
+  let llmCalls = 0;
+  const { cap } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    throw new Error("strict DLP must not reach the evaluator");
+  };
+  const result = await runDlp({
+    prompt: "Email alice@example.com the deployment report.",
+    config: { enabled: true, contextMode: "strict", action: "ask", categories: ["pii"], model: "" },
+    capabilities: cap,
+    startedAt: Date.now(),
+  });
+  assert.equal(llmCalls, 0);
+  assert.equal(result.result?.requiresApproval, true);
+  assert.equal(result.run.status, "needs_question");
+});
+
+test("DLP never auto-allows credentials even when contextual output recommends it", async () => {
+  const credential = `sk-proj-${"q".repeat(40)}`;
+  const { cap } = capabilities({
+    json: {
+      matched: true,
+      categories: ["tokens"],
+      findings: [{ category: "tokens", quote: credential, reason: "Token detected." }],
+      maskedText: "Use [TOKEN_MASKED]",
+      recommendation: "allow",
+      explanation: "Requested by the user.",
+      necessaryForUserGoal: true,
+      minimalScope: true,
+      safeToShareWithAgent: true,
+      confidence: "high",
+    },
+    model: "fixture",
+    provider: "test",
+    source: "test",
+  });
+  const result = await runDlp({
+    prompt: `Use ${credential}`,
+    config: { enabled: true, contextMode: "goal-aware", action: "ask", categories: ["tokens"], model: "" },
+    capabilities: cap,
+    startedAt: Date.now(),
+  });
+  assert.equal(result.result?.requiresApproval, true);
+  assert.equal(result.run.status, "needs_question");
+});
+
 test("plugin failures never expose rejected credentials in user-facing diagnostics", () => {
   const diagnostic = safePluginFailureDiagnostic(
     new Error("401 Incorrect API key provided: sk-test-should-never-appear"),
@@ -182,6 +265,236 @@ test("sensitive-access asks before reading a private key", async () => {
   const result = await runSensitiveAccess(pipelineInput(request("Bash", { command: "cat ~/.ssh/id_rsa" })), cap);
   assert.ok(result.results.some((item) => item.status === "needs_question" || item.status === "failed"));
   assert.ok(emitted.signals.length > 0);
+});
+
+test("sensitive-access goal-aware mode allows a necessary project env read without asking", async () => {
+  clearContextualNecessityCacheForTests();
+  let llmCalls = 0;
+  const { cap, emitted } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    return {
+      json: {
+        necessaryForUserGoal: true,
+        minimalScope: true,
+        exposesSecretValues: false,
+        sendsDataExternally: false,
+        confidence: "high",
+        recommendation: "allow",
+        reason: "The user asked to configure and deploy this website, and the agent is reading only its project env file.",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never;
+  };
+  const value = request("Read", { file_path: "/work/site/.env" });
+  value.event.projectPath = "/work/site";
+  value.event.transcript = [
+    { role: "user", content: "Configure this website for https://site.example from its existing environment and deploy it to production." },
+    { role: "assistant", content: "I will inspect the project configuration and deploy the site." },
+  ];
+  const result = await runSensitiveAccess(pipelineInput(value), cap);
+  assert.equal(llmCalls, 1);
+  assert.equal(result.run.status, "passed");
+  assert.equal(result.results.length, 0);
+  assert.ok(emitted.signals.some((signal) => (signal as { decision?: string }).decision === "allow"));
+});
+
+test("sensitive-access loads recent session context when a tool hook has no inline transcript", async () => {
+  clearContextualNecessityCacheForTests();
+  let contextCalls = 0;
+  let evaluatorPrompt = "";
+  const { cap } = capabilities();
+  cap.context.conversation.recent = async () => {
+    contextCalls += 1;
+    return {
+      sessionId: "session-test",
+      turns: [{ role: "user", content: "Configure the website using its existing project environment." }],
+      truncated: false,
+    };
+  };
+  cap.llm.evaluateJson = async (input) => {
+    evaluatorPrompt = input.prompt;
+    return {
+      json: {
+        necessaryForUserGoal: true,
+        minimalScope: true,
+        exposesSecretValues: false,
+        sendsDataExternally: false,
+        confidence: "high",
+        recommendation: "allow",
+        reason: "The project environment is needed for the requested configuration.",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never;
+  };
+  const value = request("Read", { file_path: "/work/site/.env" });
+  value.event.projectPath = "/work/site";
+  const result = await runSensitiveAccess(pipelineInput(value), cap);
+  assert.equal(contextCalls, 1);
+  assert.match(evaluatorPrompt, /Configure the website using its existing project environment/);
+  assert.equal(result.run.status, "passed");
+});
+
+test("sensitive-access strict mode asks for every env read without an evaluator call", async () => {
+  clearContextualNecessityCacheForTests();
+  let llmCalls = 0;
+  const { cap } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    throw new Error("strict matches must not reach the evaluator");
+  };
+  const plugins = new Map<string, PluginSettingState>([["openleash.sensitive-access", {
+    enabled: true,
+    config: { contextMode: "strict" },
+  }]]);
+  const result = await runSensitiveAccess(
+    pipelineInput(request("Bash", { command: "cat .env" }), plugins),
+    cap,
+  );
+  assert.equal(llmCalls, 0);
+  assert.equal(result.run.status, "needs_question");
+});
+
+test("sensitive-access never auto-allows raw private key reads", async () => {
+  clearContextualNecessityCacheForTests();
+  let llmCalls = 0;
+  const { cap } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    return {
+      json: {
+        necessaryForUserGoal: true,
+        minimalScope: true,
+        exposesSecretValues: false,
+        sendsDataExternally: false,
+        confidence: "high",
+        recommendation: "allow",
+        reason: "The agent claims it needs the key.",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never;
+  };
+  const result = await runSensitiveAccess(
+    pipelineInput(request("Bash", { command: "cat ~/.ssh/id_rsa" })),
+    cap,
+  );
+  assert.equal(llmCalls, 0);
+  assert.equal(result.run.status, "needs_question");
+});
+
+test("sensitive-access asks when goal-aware context is ambiguous or unavailable", async () => {
+  for (const evaluator of [
+    async () => ({
+      json: {
+        necessaryForUserGoal: false,
+        minimalScope: true,
+        exposesSecretValues: false,
+        sendsDataExternally: false,
+        confidence: "medium",
+        recommendation: "ask",
+        reason: "The goal does not explain why credentials are needed.",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never),
+    async () => { throw new Error("evaluator unavailable"); },
+  ]) {
+    clearContextualNecessityCacheForTests();
+    const { cap } = capabilities();
+    cap.llm.evaluateJson = evaluator;
+    const result = await runSensitiveAccess(
+      pipelineInput(request("Bash", { command: "cat .env" })),
+      cap,
+    );
+    assert.equal(result.run.status, "needs_question");
+  }
+});
+
+test("sensitive-access evaluates multiple matches once and reuses a scoped allow", async () => {
+  clearContextualNecessityCacheForTests();
+  let llmCalls = 0;
+  const { cap } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    return {
+      json: {
+        necessaryForUserGoal: true,
+        minimalScope: true,
+        exposesSecretValues: false,
+        sendsDataExternally: false,
+        confidence: "high",
+        recommendation: "allow",
+        reason: "Necessary scoped configuration inspection.",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never;
+  };
+  const value = request("Bash", { command: "cat .env && printenv" });
+  value.event.projectPath = "/work/site";
+  value.event.transcript = [{ role: "user", content: "Diagnose this site's local environment configuration." }];
+  const first = await runSensitiveAccess(pipelineInput(value), cap);
+  const repeated = await runSensitiveAccess(pipelineInput(value), cap);
+  assert.equal(first.run.status, "passed");
+  assert.equal(repeated.run.status, "passed");
+  assert.equal(llmCalls, 1);
+
+  const changed = structuredClone(value);
+  changed.event.tool!.input = { command: "cat .env.production && printenv" };
+  await runSensitiveAccess(pipelineInput(changed), cap);
+  assert.equal(llmCalls, 2);
+
+  const otherProject = structuredClone(value);
+  otherProject.event.projectPath = "/work/other-site";
+  await runSensitiveAccess(pipelineInput(otherProject), cap);
+  assert.equal(llmCalls, 3);
+
+  const changedGoal = structuredClone(value);
+  changedGoal.event.transcript = [{ role: "user", content: "Audit an unrelated documentation typo." }];
+  await runSensitiveAccess(pipelineInput(changedGoal), cap);
+  assert.equal(llmCalls, 4);
+});
+
+test("context-aware protections share one in-flight decision for the same action", async () => {
+  clearContextualNecessityCacheForTests();
+  let llmCalls = 0;
+  const { cap } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    return {
+      json: {
+        necessaryForUserGoal: true,
+        minimalScope: true,
+        exposesSecretValues: false,
+        sendsDataExternally: false,
+        confidence: "high",
+        recommendation: "allow",
+        reason: "The obsolete project-only file must be removed for the requested cleanup.",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never;
+  };
+  const value = request("Bash", { command: "rm -rf ./.env" });
+  value.event.projectPath = "/work/disposable-site";
+  value.event.transcript = [{ role: "user", content: "Remove the obsolete .env file from this disposable site." }];
+  const input = pipelineInput(value);
+  const [sensitive, destructive] = await Promise.all([
+    runSensitiveAccess(input, cap),
+    runBlastRadius(input, cap),
+  ]);
+  assert.equal(llmCalls, 1);
+  assert.equal(sensitive.run.status, "passed");
+  assert.equal(destructive.run.status, "passed");
 });
 
 test("sensitive-access does not invoke the evaluator for a conclusive secret match", async () => {
@@ -345,6 +658,57 @@ test("blast-radius asks before recursive filesystem deletion by default", async 
   assert.ok(result.results.some((item) => item.status === "needs_question"));
   assert.equal(result.run.status, "needs_question");
   assert.equal(emitted.island.length, 1);
+});
+
+test("blast-radius goal-aware mode allows a necessary narrow cleanup", async () => {
+  clearContextualNecessityCacheForTests();
+  let llmCalls = 0;
+  const { cap } = capabilities();
+  cap.llm.evaluateJson = async () => {
+    llmCalls += 1;
+    return {
+      json: {
+        necessaryForUserGoal: true,
+        minimalScope: true,
+        exposesSecretValues: false,
+        sendsDataExternally: false,
+        confidence: "high",
+        recommendation: "allow",
+        reason: "Removing the generated build folder is required for the requested clean rebuild.",
+      },
+      model: "fixture",
+      provider: "test",
+      source: "test",
+    } as never;
+  };
+  const value = request("Bash", { command: "rm -rf ./build" });
+  value.event.projectPath = "/work/site";
+  value.event.transcript = [{ role: "user", content: "Do a clean rebuild of the website." }];
+  const result = await runBlastRadius(pipelineInput(value), cap);
+  assert.equal(llmCalls, 1);
+  assert.equal(result.run.status, "passed");
+  assert.equal(result.results.length, 0);
+});
+
+test("blast-radius strict mode and inherently broad targets always ask without context calls", async () => {
+  for (const { command, plugins } of [
+    {
+      command: "rm -rf ./build",
+      plugins: new Map<string, PluginSettingState>([["openleash.blast-radius", { enabled: true, config: { contextMode: "strict" } }]]),
+    },
+    { command: "rm -rf /", plugins: undefined },
+  ]) {
+    clearContextualNecessityCacheForTests();
+    let llmCalls = 0;
+    const { cap } = capabilities();
+    cap.llm.evaluateJson = async () => {
+      llmCalls += 1;
+      throw new Error("this action must not reach contextual evaluation");
+    };
+    const result = await runBlastRadius(pipelineInput(request("Bash", { command }), plugins), cap);
+    assert.equal(llmCalls, 0, command);
+    assert.equal(result.run.status, "needs_question", command);
+  }
 });
 
 test("blast-radius catches common recursive deletion and overwrite bypasses", async () => {

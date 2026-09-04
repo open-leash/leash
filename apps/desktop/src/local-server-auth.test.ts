@@ -91,3 +91,28 @@ test("the loopback OAuth return is consumed directly without an external-app pro
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test("the loopback control plane reports oversized JSON as 413", async () => {
+  const previousLimit = process.env.OPENLEASH_DESKTOP_EDGE_MAX_BODY_BYTES;
+  process.env.OPENLEASH_DESKTOP_EDGE_MAX_BODY_BYTES = "128";
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "openleash-local-body-limit-"));
+  const server = new LocalOpenLeashServer(dataDir, { apiPort: 0, legacyAuthPort: 0 });
+  await server.start();
+  try {
+    const response = await fetch(new URL("/v1/evaluate", server.apiUrl), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${server.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ padding: "x".repeat(256) }),
+    });
+    assert.equal(response.status, 413);
+    assert.match(await response.text(), /exceeds 128 bytes/);
+  } finally {
+    await server.stop();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    if (previousLimit === undefined) delete process.env.OPENLEASH_DESKTOP_EDGE_MAX_BODY_BYTES;
+    else process.env.OPENLEASH_DESKTOP_EDGE_MAX_BODY_BYTES = previousLimit;
+  }
+});

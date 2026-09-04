@@ -34,6 +34,18 @@ test("Token Saver declares every capability used by its in-process handler", () 
   assert.ok(tokenSaver.permissions.includes("island:publish"));
 });
 
+test("interrupting protections default to goal-aware context and expose strict mode", () => {
+  for (const pluginId of ["openleash.dlp", "openleash.sensitive-access", "openleash.blast-radius"]) {
+    const plugin = firstPartyPluginManifests.find((item) => item.id === pluginId);
+    assert.ok(plugin, pluginId);
+    assert.equal(plugin.defaultConfig?.contextMode, "goal-aware", pluginId);
+    const properties = plugin.configSchema?.properties as Record<string, { enum?: string[] }> | undefined;
+    assert.deepEqual(properties?.contextMode?.enum, ["goal-aware", "strict"], pluginId);
+    assert.ok(plugin.permissions.includes("model:invoke"), pluginId);
+    if (pluginId !== "openleash.dlp") assert.ok(plugin.permissions.includes("conversation:read"), pluginId);
+  }
+});
+
 test("provider prompt helpers support OpenAI and Anthropic request shapes", () => {
   const responses = { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "old" }] }] };
   assert.equal(latestProviderPrompt(responses), "old");

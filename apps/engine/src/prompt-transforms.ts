@@ -15,6 +15,7 @@ export type PromptTransformConfig = {
     action: DlpAction;
     categories: DlpCategory[];
     model: string;
+    contextMode?: "goal-aware" | "strict";
   };
 };
 
@@ -51,7 +52,8 @@ export const defaultPromptTransformConfig: PromptTransformConfig = {
     enabled: true,
     action: "ask",
     categories: ["pii", "phi", "tokens", "keys", "credentials"],
-    model: process.env.OPENLEASH_PROMPT_TRANSFORM_MODEL ?? "gpt-4.1-nano"
+    model: process.env.OPENLEASH_PROMPT_TRANSFORM_MODEL ?? "gpt-4.1-nano",
+    contextMode: "goal-aware"
   }
 };
 
@@ -70,7 +72,8 @@ export function normalizePromptTransformConfig(value: unknown): PromptTransformC
       enabled: Boolean(dlp.enabled),
       action: isDlpAction(dlp.action) ? dlp.action : defaultPromptTransformConfig.dlp.action,
       categories: Array.isArray(dlp.categories) ? dlp.categories.filter(isDlpCategory) : defaultPromptTransformConfig.dlp.categories,
-      model: cleanModel(dlp.model) ?? defaultPromptTransformConfig.dlp.model
+      model: cleanModel(dlp.model) ?? defaultPromptTransformConfig.dlp.model,
+      contextMode: dlp.contextMode === "strict" ? "strict" : "goal-aware"
     }
   };
 }

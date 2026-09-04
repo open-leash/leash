@@ -6,13 +6,13 @@ export const blastRadiusManifest: OpenLeashPluginManifest = {
   name: LEASH_FEATURE_PRESENTATIONS["blast-radius"].name,
   description: LEASH_FEATURE_PRESENTATIONS["blast-radius"].description,
   repositoryUrl: "https://github.com/open-leash/plugin-blast-radius",
-  version: "1.0.2",
+  version: "1.1.0",
   publisher: "openleash",
   runtime: "builtin",
-  execution: firstPartyFeature("blast-radius", "1.0.2"),
+  execution: firstPartyFeature("blast-radius", "1.1.0"),
   entrypoint: "client-api",
   events: ["prompt.beforeSubmit", "tool.beforeUse"],
-  permissions: ["event:read", "prompt:read", "tool:read", "decision:write", "audit:write", "log:write", "signal:write", "island:publish"],
+  permissions: ["event:read", "prompt:read", "tool:read", "conversation:read", "model:invoke", "decision:write", "audit:write", "log:write", "signal:write", "island:publish"],
   effects: ["observe", "ask", "deny"],
   ordering: {
     priority: 220,
@@ -23,6 +23,7 @@ export const blastRadiusManifest: OpenLeashPluginManifest = {
     additionalProperties: false,
     properties: {
       enabled: { type: "boolean" },
+      contextMode: { enum: ["goal-aware", "strict"] },
       destructiveAction: { enum: ["allow", "ask", "block"] },
       databaseMutationAction: { enum: ["allow", "ask", "block"] },
       broadFilesystemAction: { enum: ["allow", "ask", "block"] }
@@ -30,6 +31,7 @@ export const blastRadiusManifest: OpenLeashPluginManifest = {
   },
   defaultConfig: {
     enabled: true,
+    contextMode: "goal-aware",
     destructiveAction: "ask",
     databaseMutationAction: "ask",
     broadFilesystemAction: "ask"

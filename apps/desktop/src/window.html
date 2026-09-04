@@ -7707,6 +7707,7 @@
       function settingLabel(value) {
         const labels = {
           action: "If AI tries to share private information",
+          contextMode: "When should Leash interrupt you?",
           categories: "What should Leash keep private?",
           destructiveAction: "Deleting or destroying things",
           databaseMutationAction: "Changing your database",
@@ -7729,6 +7730,8 @@
           allow: "Let it continue",
           ask: "Ask me first",
           block: "Stop it",
+          "goal-aware": "Goal-aware",
+          strict: "Strict",
           light: "Save a little",
           standard: "Balanced",
           maximum: "Save the most"
@@ -8669,6 +8672,7 @@
       }
 
       function pluginSettingHint(key) {
+        if (key === "contextMode") return "Goal-aware: Ask only when Leash cannot confirm the action is needed for your current task. Strict: Ask every time this protection matches.";
         if (key === "action" || key.endsWith("Action")) return "Let it continue records what happened. Ask me first pauses AI for your choice. Stop it blocks the action.";
         if (key === "categories") return "Choose the information you never want AI to share by mistake.";
         if (key === "level") return "Higher savings remove more repeated text before it is sent to AI.";

@@ -84,6 +84,7 @@ import { eventForHookEvent } from "./plugins/events.js";
 import { runEvaluationPipeline, runPromptPipeline } from "./plugins/runtime.js";
 import { createPluginCapabilities } from "./plugins/capabilities.js";
 import {
+  latestProviderPrompt,
   transformProviderRequestWithFeatures,
   verifyBuiltinFeatureRegistry,
 } from "./plugins/feature-runtime.js";
@@ -994,9 +995,14 @@ app.post("/v1/plugin-runtime/transform", async (req, res, next) => {
     const organizationId =
       user.organization_id ?? (await ensureDefaultOrganization()).id;
     const requestBody = req.body?.requestBody;
-    if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) {
-      return res.status(400).json({ error: "requestBody must be a JSON object" });
+    const prompt = typeof req.body?.prompt === "string" ? req.body.prompt : undefined;
+    const legacyRequest = requestBody && typeof requestBody === "object" && !Array.isArray(requestBody);
+    if (!legacyRequest && prompt === undefined) {
+      return res.status(400).json({ error: "prompt or requestBody is required" });
     }
+    const runtimeRequestBody = legacyRequest
+      ? requestBody as Record<string, unknown>
+      : { input: prompt };
     const provider = String(req.body?.provider ?? "unknown").trim() || "unknown";
     const agentKind = String(req.body?.agentKind ?? "unknown").trim() || "unknown";
     const agentId = await validatedAgentRuntimeId(
@@ -1034,7 +1040,7 @@ app.post("/v1/plugin-runtime/transform", async (req, res, next) => {
       tenantModelKeyForEvaluation(organizationId),
     ]);
     const result = await transformProviderRequestWithFeatures({
-      requestBody: requestBody as Record<string, unknown>,
+      requestBody: runtimeRequestBody,
       config,
       plugins: new Map(catalog.plugins.map((feature) => [feature.id, feature.settings])),
       tenantModelKey,
@@ -1045,11 +1051,14 @@ app.post("/v1/plugin-runtime/transform", async (req, res, next) => {
       sessionId,
       projectPath,
       agentId,
+      transcript: normalizeHookTranscript(req.body?.transcript),
     });
     res.json({
       protocol: "openleash-container-plugin.v1",
       runtime: "in-process",
-      requestBody: result.requestBody,
+      ...(legacyRequest
+        ? { requestBody: result.requestBody }
+        : { finalPrompt: latestProviderPrompt(result.requestBody) ?? prompt }),
       appliedPluginIds: result.appliedPluginIds,
       runs: result.runs,
     });
@@ -1134,8 +1143,9 @@ app.post("/v1/hooks/:agent/:event", async (req, res, next) => {
         .status(400)
         .json({ error: "unsupported OpenLeash hook target" });
     }
-    const activityAgent = attributedHookAgent(agent, req.body);
-    const request = normalizeHookRequest(activityAgent, eventName, req.body, req.query);
+    const hookBody = await withTranscriptContext(req.body);
+    const activityAgent = attributedHookAgent(agent, hookBody);
+    const request = normalizeHookRequest(activityAgent, eventName, hookBody, req.query);
     if (await isSessionMonitoringPaused(user, request)) {
       return res.json(nativeHookDecision(
         agent,
@@ -1149,7 +1159,7 @@ app.post("/v1/hooks/:agent/:event", async (req, res, next) => {
       agent: request.agent.kind,
       event: eventName,
       sessionId: request.event.sessionId,
-      payload: req.body,
+      payload: hookBody,
       query: req.query,
     });
     const hookEnvelope = normalizeAgentEvent({
@@ -10146,12 +10156,14 @@ async function withTranscriptContext(
   if (!payload || typeof payload !== "object") return payload;
   const event = payload as {
     transcript?: unknown;
+    transcript_path?: unknown;
+    transcriptPath?: unknown;
     raw?: { transcript_path?: unknown; transcriptPath?: unknown };
   };
   if (Array.isArray(event.transcript) && event.transcript.length > 0)
     return payload;
   const transcript = await readClaudeTranscript(
-    event.raw?.transcript_path ?? event.raw?.transcriptPath,
+    event.transcript_path ?? event.transcriptPath ?? event.raw?.transcript_path ?? event.raw?.transcriptPath,
     occurredAt,
   );
   return transcript ? { ...event, transcript } : payload;
@@ -10164,7 +10176,8 @@ async function readClaudeTranscript(
   if (typeof filePath !== "string" || !filePath.trim()) return undefined;
   const resolved = path.resolve(filePath);
   const claudeProjects = path.join(os.homedir(), ".claude", "projects");
-  if (!resolved.startsWith(claudeProjects)) return undefined;
+  const relative = path.relative(claudeProjects, resolved);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
   try {
     const cutoff = occurredAt
       ? new Date(occurredAt).getTime() + 5000
@@ -10197,7 +10210,7 @@ function claudeTranscriptTurn(line: string): ConversationTurn[] {
         ? record.message.role
         : record.type;
     if (role !== "user" && role !== "assistant") return [];
-    const content = transcriptContentToText(record.message?.content);
+    const content = transcriptContentToText(record.message?.content).slice(0, 4_000);
     if (!content || shouldSkipTranscriptText(content)) return [];
     return [
       {
@@ -10220,12 +10233,9 @@ function transcriptContentToText(value: unknown): string {
       const record = item as {
         type?: unknown;
         text?: unknown;
-        content?: unknown;
       };
       if (record.type === "text" && typeof record.text === "string")
         return record.text;
-      if (record.type === "tool_result" && typeof record.content === "string")
-        return record.content;
       return "";
     })
     .filter(Boolean)

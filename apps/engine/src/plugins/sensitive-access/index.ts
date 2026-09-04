@@ -1,6 +1,7 @@
 import { type PluginCapabilities, type PolicyDecision } from "@openleash/shared";
 import { eventForHookEvent } from "../events.js";
 import { pluginRun, type EvaluationPipelineInput } from "../types.js";
+import { contextMode, evaluateContextualNecessity, type ContextualNecessityDecision } from "../contextual-necessity.js";
 import { sensitiveAccessManifest as manifest } from "./manifest.js";
 
 export { manifest };
@@ -39,6 +40,27 @@ export async function runSensitiveAccess(input: EvaluationPipelineInput, capabil
   const text = context.searchText;
   const config = pluginConfig(input.plugins?.get(manifest.id)?.config);
   const matches = detectSensitiveAccess(text, config);
+  let contextual: ContextualNecessityDecision | undefined;
+  const contextualMatches = matches.filter((match) => match.action === "ask");
+  if (
+    config.contextMode === "goal-aware"
+    && contextualMatches.length > 0
+    && input.request.event.eventName === "PreToolUse"
+    && !EXFIL_PATTERN.test(text)
+    && !isNeverAutoAllowedSensitiveAccess(text)
+  ) {
+    contextual = await evaluateContextualNecessity({
+      pipeline: input,
+      capabilities,
+      protectionId: manifest.id,
+      actionCategory: [...new Set(contextualMatches.map((match) => match.policyId))].sort().join(","),
+      actionDescription: contextualMatches.map((match) => match.explanation).join(" "),
+      evidence: contextualMatches.flatMap((match) => match.evidence),
+    });
+    if (contextual.allowWithoutAsking) {
+      for (const match of contextualMatches) match.action = "allow";
+    }
+  }
   // The LLM result is deliberately ignored unless the event contains an actual
   // sensitive-resource, environment-dump, or exfiltration anchor. Avoid paying
   // for and blocking on a model call when it cannot affect the decision.
@@ -73,7 +95,12 @@ export async function runSensitiveAccess(input: EvaluationPipelineInput, capabil
       status: result.status,
       target: { type: input.request.event.tool?.name ? "tool_call" : "agent_event", name: input.request.event.tool?.name ?? input.request.event.eventName },
       evidence: result.evidence ?? [],
-      details: { pluginId: manifest.id, source: result.policyId.includes("llm") ? "llm" : "heuristic" },
+      details: {
+        pluginId: manifest.id,
+        source: result.policyId.includes("llm") ? "llm" : "heuristic",
+        contextMode: config.contextMode,
+        contextualReason: contextual?.reason,
+      },
       correlationKeys: ["sensitive-access", `session:${input.request.event.sessionId}`]
     });
   }
@@ -87,7 +114,13 @@ export async function runSensitiveAccess(input: EvaluationPipelineInput, capabil
       status: "observed",
       target: { type: input.request.event.tool?.name ? "tool_call" : "agent_event", name: input.request.event.tool?.name ?? input.request.event.eventName },
       evidence: match.evidence,
-      details: { pluginId: manifest.id, configuredAction: "allow" },
+      details: {
+        pluginId: manifest.id,
+        configuredAction: contextual?.allowWithoutAsking ? "ask" : "allow",
+        contextMode: config.contextMode,
+        contextuallyAllowed: Boolean(contextual?.allowWithoutAsking),
+        contextualReason: contextual?.reason,
+      },
       correlationKeys: ["sensitive-access", `session:${input.request.event.sessionId}`]
     });
   }
@@ -97,7 +130,11 @@ export async function runSensitiveAccess(input: EvaluationPipelineInput, capabil
       category: "security",
       code: "sensitive-access-detected",
       message: results.length === 1 ? results[0].explanation : `${results.length} sensitive access patterns detected.`,
-      data: { results, llm: llm && "decision" in llm ? { model: llm.model, decision: llm.decision } : llm }
+      data: {
+        results,
+        llm: llm && "decision" in llm ? { model: llm.model, decision: llm.decision } : llm,
+        contextual,
+      }
     });
   }
 
@@ -121,7 +158,9 @@ export async function runSensitiveAccess(input: EvaluationPipelineInput, capabil
       })),
       metadata: {
         inspected: context.summary,
-        llm: llm && "decision" in llm ? { model: llm.model, provider: llm.provider, source: llm.source } : llm
+        llm: llm && "decision" in llm ? { model: llm.model, provider: llm.provider, source: llm.source } : llm,
+        contextMode: config.contextMode,
+        contextual,
       }
     })
   };
@@ -265,8 +304,9 @@ function eventText(input: EvaluationPipelineInput) {
     JSON.stringify(input.request.event.tool?.input ?? {}),
     JSON.stringify(input.request.event.tool?.output ?? {}),
     input.request.event.prompt,
-    JSON.stringify(input.request.event.transcript?.slice(-4) ?? []),
-    JSON.stringify(input.request.event.raw ?? {})
+    !input.request.event.tool && !input.request.event.prompt
+      ? JSON.stringify(input.request.event.raw ?? {})
+      : undefined
   ].filter(Boolean).join("\n");
 }
 
@@ -331,10 +371,15 @@ function compactUnknown(value: unknown, max: number): unknown {
 function pluginConfig(config: Record<string, unknown> | undefined) {
   const action = (value: unknown, fallback: "allow" | "ask" | "block") => value === "allow" || value === "ask" || value === "block" ? value : fallback;
   return {
+    contextMode: contextMode(config?.contextMode),
     secretFileAction: action(config?.secretFileAction, "ask"),
     envDumpAction: action(config?.envDumpAction, "ask"),
     exfiltrationAction: action(config?.exfiltrationAction, "block")
   };
+}
+
+function isNeverAutoAllowedSensitiveAccess(text: string) {
+  return /(?:^|[\/\s"'`])(?:\.netrc|\.npmrc|\.pypirc|id_rsa|id_ed25519|kubeconfig|credentials|secrets?\.ya?ml|service-account[^\s"'`]*\.json|firebase[^\s"'`]*\.json)(?=$|[\/\s"'`:;])|\bprivate\s+key\b|-----BEGIN [A-Z ]*PRIVATE KEY-----/i.test(text);
 }
 
 function snippets(text: string, patterns: RegExp[]) {

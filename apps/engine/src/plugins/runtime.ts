@@ -77,6 +77,7 @@ export async function runPromptPipeline(
           config: input.config.dlp,
           capabilities,
           startedAt: Date.now(),
+          recentTranscript: input.request.event.transcript,
         });
         current = step.prompt;
         if (monitorOnly) current = promptBeforePlugin;

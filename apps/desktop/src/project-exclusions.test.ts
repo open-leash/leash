@@ -70,6 +70,26 @@ test("the desktop edge bypasses monitoring and transformation for excluded proje
     assert.equal(transformed.projectExcluded, true);
     assert.deepEqual(transformed.requestBody, { input: "leave this unchanged" });
 
+    const compactTransform = await fetch(new URL("/v1/plugin-runtime/transform", server.apiUrl), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${server.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agentKind: "codex",
+        sessionId: "excluded-session",
+        projectPath: "/Users/max/Code/OL2/leash",
+        prompt: "leave this compact prompt unchanged",
+        transcript: [{ role: "user", content: "build a website" }],
+      }),
+    });
+    assert.equal(compactTransform.status, 200);
+    const compactResult = await compactTransform.json() as Record<string, unknown>;
+    assert.equal(compactResult.finalPrompt, "leave this compact prompt unchanged");
+    assert.equal(compactResult.requestBody, undefined);
+    assert.equal(compactResult.monitoringPaused, true);
+
     const hook = await fetch(new URL("/v1/hooks/codex/PreToolUse", server.apiUrl), {
       method: "POST",
       headers: {

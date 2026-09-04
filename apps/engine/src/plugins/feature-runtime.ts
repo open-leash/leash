@@ -1,4 +1,5 @@
 import type {
+  ConversationTurn,
   EvaluationRequest,
   PluginCatalogItem,
   PluginPromptPipelineConfig,
@@ -72,6 +73,7 @@ export async function transformProviderRequestWithFeatures(input: {
   config: PluginPromptPipelineConfig;
   plugins: Map<string, PluginSettingState>;
   tenantModelKey?: TenantModelKey;
+  transcript?: ConversationTurn[];
 }) {
   const prompt = latestProviderPrompt(input.requestBody);
   if (!prompt) {
@@ -90,6 +92,7 @@ export async function transformProviderRequestWithFeatures(input: {
       sessionId: input.sessionId,
       projectPath: input.projectPath,
       prompt,
+      transcript: input.transcript,
       occurredAt: new Date().toISOString(),
       raw: {
         provider: input.provider,
