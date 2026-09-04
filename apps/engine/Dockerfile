@@ -1,4 +1,5 @@
 FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS builder
+RUN apk upgrade --no-cache
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json packages/shared/package.json
@@ -10,6 +11,7 @@ RUN npm run build -w @openleash/shared && npm run build -w @openleash/client-api
 RUN npm prune --omit=dev && npm cache clean --force
 
 FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS runner
+RUN apk upgrade --no-cache
 LABEL org.opencontainers.image.source="https://github.com/open-leash/leash" \
       org.opencontainers.image.title="Leash Engine" \
       org.opencontainers.image.licenses="Apache-2.0"
