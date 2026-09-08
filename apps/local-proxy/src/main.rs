@@ -19,6 +19,10 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+// Multimodal conversations can exceed 16 MiB even when their text is small.
+// Keep buffering bounded while allowing image-heavy agent requests.
+const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Parser, Clone)]
 #[command(name = "openleash-local-proxy")]
 struct Config {
@@ -69,7 +73,7 @@ struct Config {
     #[arg(
         long,
         env = "OPENLEASH_PROXY_MAX_BODY_BYTES",
-        default_value_t = 16_777_216
+        default_value_t = DEFAULT_MAX_BODY_BYTES
     )]
     max_body_bytes: usize,
     #[arg(
@@ -1875,6 +1879,24 @@ fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn image_heavy_requests_fit_but_body_limits_remain_enforced() {
+        let config = Config::try_parse_from(["proxy", "--token", "test"]).unwrap();
+        assert_eq!(config.max_body_bytes, 64 * 1024 * 1024);
+        let payload = vec![b'x'; 17 * 1024 * 1024];
+        let bytes = to_bytes(Body::from(payload), config.max_body_bytes)
+            .await
+            .unwrap();
+        assert_eq!(bytes.len(), 17 * 1024 * 1024);
+
+        let custom = Config::try_parse_from([
+            "proxy", "--token", "test", "--max-body-bytes", "1024",
+        ]).unwrap();
+        assert!(to_bytes(Body::from(vec![b'x'; 1025]), custom.max_body_bytes)
+            .await
+            .is_err());
+    }
+
     #[test]
     fn rewrites_openai_prompt() {
         let mut v = json!({"messages":[{"role":"user","content":"old"}]});

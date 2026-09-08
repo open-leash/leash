@@ -66,6 +66,14 @@ test("only managed proxy installs enable the classified availability fallback", 
   );
 });
 
+test("managed proxy allows image-heavy requests and preserves explicit body limits", () => {
+  const options = { clientApiUrl: "http://127.0.0.1:9317", token: "test" };
+  assert.equal(localProxyEnvironment(options, {}).OPENLEASH_PROXY_MAX_BODY_BYTES, "67108864");
+  assert.equal(localProxyEnvironment(options, {
+    OPENLEASH_PROXY_MAX_BODY_BYTES: "33554432",
+  }).OPENLEASH_PROXY_MAX_BODY_BYTES, "33554432");
+});
+
 test("Claude proxy configuration is reversible", () => {
   const file = path.join(home, ".claude", "settings.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });

@@ -125,6 +125,7 @@ export function localProxyEnvironment(
   return {
     ...base,
     OPENLEASH_PROXY_LISTEN: "127.0.0.1:9320",
+    OPENLEASH_PROXY_MAX_BODY_BYTES: base.OPENLEASH_PROXY_MAX_BODY_BYTES ?? String(64 * 1024 * 1024),
     OPENLEASH_CLIENT_API: options.clientApiUrl.replace(/\/$/, ""),
     OPENLEASH_TOKEN: options.token,
     // The desktop edge classifies Cloud failures. This final native fallback
