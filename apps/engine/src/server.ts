@@ -3759,6 +3759,7 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
       if (
         audience === "organization" &&
         isPersonalEmailDomain(profile.email) &&
+        process.env.OPENLEASH_INSTANT_BUSINESS_MIGRATION_ENABLED !== "1" &&
         !(
           requestedOrganization &&
           (await canUseCloudOwnerLogin(requestedOrganization.id, profile.email))
@@ -3896,6 +3897,7 @@ app.post("/v1/mobile/auth/exchange", async (req, res, next) => {
     if (
       audience === "organization" &&
       isPersonalEmailDomain(profile.email) &&
+      process.env.OPENLEASH_INSTANT_BUSINESS_MIGRATION_ENABLED !== "1" &&
       !(
         requestedOrganization &&
         (await canUseCloudOwnerLogin(requestedOrganization.id, profile.email))
@@ -10521,6 +10523,9 @@ async function resolveManagedMobileOrganization(
   const email = profile.email.toLowerCase();
   const domain = email.split("@")[1]?.trim() ?? "";
   if (audience === "organization" && domain) {
+    if (isPersonalEmailDomain(email) && process.env.OPENLEASH_INSTANT_BUSINESS_MIGRATION_ENABLED === "1") {
+      return resolveInstantBusinessOrganization(profile);
+    }
     const organization = await resolveOrganizationForWorkDomain(domain);
     return {
       ...organization,
@@ -10565,6 +10570,22 @@ async function resolveManagedMobileOrganization(
     ...(await ensureManagedMobileOrganization()),
     defaultUserRole: "engineer",
   };
+}
+
+async function resolveInstantBusinessOrganization(profile: ManagedAuthProfile): Promise<ManagedOrganization> {
+  const existing = await pool.query(
+    `select o.* from users u join organizations o on o.id=u.organization_id where lower(u.email)=lower($1) limit 1`,
+    [profile.email],
+  );
+  const organization = existing.rows[0] ?? await resolvePersonalCloudOrganization(profile);
+  if (!organization) throw new HttpError(500, "Could not create the Business workspace.");
+  const updated = await pool.query(
+    `update organizations set infrastructure_config=coalesce(infrastructure_config,'{}'::jsonb)
+       || '{"accountAudience":"organization","accountPackage":"work-managed","businessTier":"free-single-member"}'::jsonb,
+       deployment_mode='cloud',updated_at=now() where id=$1 returning *`,
+    [organization.id],
+  );
+  return { ...updated.rows[0], defaultUserRole:"owner" };
 }
 
 async function resolvePersonalCloudOrganization(

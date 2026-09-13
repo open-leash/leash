@@ -127,6 +127,13 @@ test("Business signup rejects consumer email providers before creating a company
   assert.match(server, /Use your company Google Workspace or Microsoft 365 account/);
 });
 
+test("instant Business gives personal-domain identities isolated single-member organizations behind its flag", () => {
+  assert.match(server, /OPENLEASH_INSTANT_BUSINESS_MIGRATION_ENABLED/);
+  assert.match(server, /resolveInstantBusinessOrganization/);
+  assert.match(server, /businessTier.*free-single-member/);
+  assert.match(server, /where lower\(u\.email\)=lower\(\$1\)/);
+});
+
 test("custom-scheme OAuth callbacks are exact and bound to a one-time PKCE verifier", () => {
   const authStart = server.slice(
     server.indexOf('app.post("/v1/mobile/auth/start"'),
