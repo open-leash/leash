@@ -48,7 +48,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0",
-    "sharp": "0.35.3",
+    "sharp": "0.35.4",
     "simple-icons": "^16.19.0"
   },
   "devDependencies": {
@@ -56,11 +56,17 @@
   },
   "overrides": {
     "form-data": "4.0.6",
+    "body-parser": "1.20.8",
+    "express@4.22.2": {
+      "body-parser": "1.20.8",
+      "qs": "6.16.0"
+    },
     "postcss": "8.5.25",
-    "sharp": "0.35.3",
+    "qs": "6.16.0",
+    "sharp": "0.35.4",
     "next": {
       "postcss": "8.5.25",
-      "sharp": "0.35.3"
+      "sharp": "0.35.4"
     },
     "tsx": {
       "esbuild": "0.28.1"

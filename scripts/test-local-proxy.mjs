@@ -685,7 +685,9 @@ function spawnProxy(port, failOpen) {
   );
 }
 async function waitForHealth(port = proxyPort) {
-  for (let i = 0; i < 120; i++) {
+  // A clean CI checkout may spend tens of seconds compiling the Rust binary
+  // before it can bind the health port. Cached runs still return immediately.
+  for (let i = 0; i < 600; i++) {
     try {
       if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return;
     } catch {}
