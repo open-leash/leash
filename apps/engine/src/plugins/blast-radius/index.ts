@@ -209,7 +209,9 @@ function eventText(input: EvaluationPipelineInput) {
     input.request.event.tool?.name,
     serializedToolInput,
     discussionSafePrompt(input.request.event.prompt),
-    command === undefined && !input.request.event.prompt ? JSON.stringify(input.request.event.raw ?? {}) : undefined
+    command === undefined && !input.request.event.prompt
+      ? JSON.stringify(input.request.event.transportEvidence ?? input.request.event.raw ?? {})
+      : undefined
   ].filter(Boolean).join("\n");
 }
 

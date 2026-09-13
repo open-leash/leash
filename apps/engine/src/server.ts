@@ -162,6 +162,7 @@ import {
   normalizeAgentEvent,
   OBSERVATION_ONLY_CAPABILITIES,
 } from "./agent-events.js";
+import { CONNECTOR_FALLBACK_FLAG, resolveConnectorDecision } from "./connector-fallback.js";
 import { agentInteractionForRequest } from "./agent-interactions.js";
 import {
   canonicalIntentKey,
@@ -224,6 +225,37 @@ function isEvaluationResponse(value: unknown): value is EvaluationResponse {
       "summary" in value &&
       "results" in value,
   );
+}
+
+async function connectorEffectiveDecision(input: {
+  user: ApiUser;
+  response: EvaluationResponse;
+  source: AgentEventSource;
+  provider: string;
+  capabilities: NormalizedAgentEvent["capabilities"];
+  startedAt?: number;
+}) {
+  const connectorResolved = resolveConnectorDecision({
+    response: input.response,
+    capabilities: input.capabilities,
+    connectorId: `${input.source}.${input.provider}`,
+    startedAt: input.startedAt,
+  });
+  const effective = await effectiveRuntimeDecision(input.user, connectorResolved);
+  if (effective.decision === "allow" && connectorResolved.decision !== "allow") {
+    effective.enforced_decision = "record";
+    effective.enforcement_record = {
+      ...connectorResolved.enforcement_record!,
+      enforced: "record",
+      degraded: true,
+    };
+  }
+  await pool.query(
+    `update evaluations set requested_decision=$3, enforced_decision=$4, enforcement_record=$5::jsonb
+     where id=$1 and user_id=$2`,
+    [effective.decisionId, input.user.id, effective.requested_decision, effective.enforced_decision, JSON.stringify(effective.enforcement_record)],
+  );
+  return effective;
 }
 
 export type ApiSurface = "client" | "dashboard" | "all";
@@ -908,7 +940,9 @@ app.post("/v1/agent-events", async (req, res, next) => {
         event: envelope.request.event.eventName,
         decision: duplicate.decision,
       });
-      const effective = await effectiveRuntimeDecision(user, duplicate);
+      const effective = process.env[CONNECTOR_FALLBACK_FLAG] === "1"
+        ? await connectorEffectiveDecision({ user, response: duplicate, source, provider: envelope.provider, capabilities: envelope.capabilities })
+        : await effectiveRuntimeDecision(user, duplicate);
       return res.json({ ...effective, source, deduplicated: true });
     }
     const inflightKey = `${user.id}:${envelope.idempotencyKey}`;
@@ -923,7 +957,9 @@ app.post("/v1/agent-events", async (req, res, next) => {
         decision: "decision" in result ? result.decision : undefined,
       });
       const effective = isEvaluationResponse(result)
-        ? await effectiveRuntimeDecision(user, result)
+        ? process.env[CONNECTOR_FALLBACK_FLAG] === "1"
+          ? await connectorEffectiveDecision({ user, response: result, source, provider: envelope.provider, capabilities: envelope.capabilities })
+          : await effectiveRuntimeDecision(user, result)
         : result;
       return res.json({ ...effective, source, deduplicated: true });
     }
@@ -975,7 +1011,9 @@ app.post("/v1/agent-events", async (req, res, next) => {
         result,
       });
       const effective = isEvaluationResponse(result)
-        ? await effectiveRuntimeDecision(user, result)
+        ? process.env[CONNECTOR_FALLBACK_FLAG] === "1"
+          ? await connectorEffectiveDecision({ user, response: result, source, provider: envelope.provider, capabilities: envelope.capabilities })
+          : await effectiveRuntimeDecision(user, result)
         : result;
       res.json({ ...effective, source, deduplicated: false });
     } finally {

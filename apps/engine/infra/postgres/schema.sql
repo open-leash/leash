@@ -244,6 +244,9 @@ alter table evaluations add column if not exists resolution_payload jsonb;
 alter table evaluations add column if not exists resolution text;
 alter table evaluations add column if not exists resolved_at timestamptz;
 alter table evaluations add column if not exists resolved_by text;
+alter table evaluations add column if not exists requested_decision text;
+alter table evaluations add column if not exists enforced_decision text;
+alter table evaluations add column if not exists enforcement_record jsonb;
 
 create or replace function openleash_notify_client_sync()
 returns trigger

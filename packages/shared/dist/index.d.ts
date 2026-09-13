@@ -1,5 +1,7 @@
 export { LEASH_FEATURE_PRESENTATIONS, LEASH_FEATURE_SHOWCASE, leashFeaturePresentation, } from "./feature-presentations.js";
 export type { LeashFeaturePresentation, LeashFeatureSlug, } from "./feature-presentations.js";
+export { LEASH_CAPABILITY_VERIFICATION_MAX_AGE_DAYS, LEASH_CONTROL_CENTER_CONTRACT_VERSION, fallbackForFeatureOutcome, isCapabilityVerificationCurrent, resolveFallback, } from "./control-center-contracts.js";
+export type { ConnectorClass, ConnectorRequestMeta, ConnectorSurface, ControlCenterEvaluationRequest, DecisionVerb, LeashBatchCapability, LeashCapability, LeashCapabilityFlags, LeashCapabilityName, LeashCapabilityVerification, LeashConformanceReport, LeashConnector, LeashDecision, LeashDecisionExtension, LeashEnforcementFailureMode, LeashEnforcementRecord, LeashFeatureOutcome, LeashInteractiveCapability, LeashTransportEvidence, } from "./control-center-contracts.js";
 export type AgentKind = "claude-code" | "codex" | "openclaw" | "nanoclaw" | "salesforce-agentforce" | "azure-ai-foundry" | "microsoft-copilot-studio" | "aws-bedrock-agentcore" | "google-vertex-ai" | "n8n" | "zapier-agents" | "openai-codex-cloud" | "cursor" | "gemini" | "opencode" | "cline" | "continue" | "windsurf" | "github-copilot" | "kiro" | "aider" | "zed" | "unknown";
 export type HookEventName = "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SubagentStart" | "SubagentStop" | "Notification" | "SessionEnd" | "Stop";
 export type PipelineEvent = "openleash.startup" | "agent.detected" | "skill.detected" | "skill.changed" | "skill.removed" | "log.emitted" | "prompt.beforeSubmit" | "provider.request.beforeSend" | "plugin.tool.execute" | "agent.response" | "tool.beforeUse" | "tool.afterUse" | "session.started" | "session.ended";
@@ -1125,6 +1127,8 @@ export type OpenLeashEvent = {
         output?: unknown;
     };
     prompt?: string;
+    /** Additive typed policy input. Old clients may omit it; raw remains opaque compatibility data. */
+    transportEvidence?: import("./control-center-contracts.js").LeashTransportEvidence;
     raw?: unknown;
     occurredAt: string;
 };
@@ -1210,6 +1214,16 @@ export type EvaluationResponse = {
     resolutionPayload?: Record<string, unknown>;
     question?: string;
     results: PolicyDecision[];
+    /** Additive Control Center metadata. Legacy clients retain the serialization above. */
+    fallback?: import("./control-center-contracts.js").DecisionVerb[];
+    requires_approval?: boolean;
+    confidence?: number;
+    evaluator_path?: string[];
+    policy_version?: number;
+    /** Connector-resolution audit fields, emitted only by the flagged resolver. */
+    requested_decision?: import("./control-center-contracts.js").DecisionVerb;
+    enforced_decision?: import("./control-center-contracts.js").DecisionVerb;
+    enforcement_record?: import("./control-center-contracts.js").LeashEnforcementRecord;
 };
 /** Business-only organization controls supplied by the private cloud control plane. */
 export type BusinessRuntimePolicy = {

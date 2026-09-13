@@ -305,14 +305,14 @@ function eventText(input: EvaluationPipelineInput) {
     JSON.stringify(input.request.event.tool?.output ?? {}),
     input.request.event.prompt,
     !input.request.event.tool && !input.request.event.prompt
-      ? JSON.stringify(input.request.event.raw ?? {})
+      ? JSON.stringify(input.request.event.transportEvidence ?? input.request.event.raw ?? {})
       : undefined
   ].filter(Boolean).join("\n");
 }
 
 function eventContext(input: EvaluationPipelineInput) {
   const recentTranscript = input.request.event.transcript?.slice(-6) ?? [];
-  const raw = compactUnknown(input.request.event.raw, 6000);
+  const raw = compactUnknown(input.request.event.transportEvidence ?? input.request.event.raw, 6000);
   const toolInput = compactUnknown(input.request.event.tool?.input, 6000);
   const toolOutput = compactUnknown(input.request.event.tool?.output, 6000);
   return {
