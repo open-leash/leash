@@ -14,7 +14,7 @@ export const SOURCE_CAPABILITIES: Record<
     observe: true,
     block: true,
     rewritePrompt: false,
-    rewriteToolInput: true,
+    rewriteToolInput: false,
     rewriteResponse: false,
   },
   // Request-time proxy events can block and rewrite prompts before forwarding. Model

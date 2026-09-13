@@ -163,6 +163,7 @@ import {
   OBSERVATION_ONLY_CAPABILITIES,
 } from "./agent-events.js";
 import { CONNECTOR_FALLBACK_FLAG, resolveConnectorDecision } from "./connector-fallback.js";
+import { DECLARED_HOOK_CONNECTORS_FLAG, hookAgentForKind, hookEventCapabilities } from "./hook-connectors.js";
 import { agentInteractionForRequest } from "./agent-interactions.js";
 import {
   canonicalIntentKey,
@@ -917,7 +918,12 @@ app.post("/v1/agent-events", async (req, res, next) => {
           : undefined,
       capabilities: responseObservation
         ? OBSERVATION_ONLY_CAPABILITIES
-        : undefined,
+        : source === "api_hook" && process.env[DECLARED_HOOK_CONNECTORS_FLAG] === "1"
+          ? (() => {
+              const hookAgent = hookAgentForKind(request.agent.kind);
+              return hookAgent ? hookEventCapabilities(hookAgent) : OBSERVATION_ONLY_CAPABILITIES;
+            })()
+          : undefined,
     });
     await writePipelineTrace("pipeline.normalized", {
       traceId: envelope.idempotencyKey,
