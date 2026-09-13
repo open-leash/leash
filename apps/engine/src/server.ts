@@ -164,6 +164,7 @@ import {
 } from "./agent-events.js";
 import { CONNECTOR_FALLBACK_FLAG, resolveConnectorDecision } from "./connector-fallback.js";
 import { DECLARED_HOOK_CONNECTORS_FLAG, hookAgentForKind, hookEventCapabilities } from "./hook-connectors.js";
+import { OTEL_CONNECTOR_FLAG, exportCanonicalEventToOtel, normalizeOtlpGenAi } from "./otel-genai.js";
 import { agentInteractionForRequest } from "./agent-interactions.js";
 import {
   canonicalIntentKey,
@@ -1029,6 +1030,17 @@ app.post("/v1/agent-events", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.post("/v1/otel/v1/logs", async (req, res, next) => {
+  if (process.env[OTEL_CONNECTOR_FLAG] !== "1") return res.status(404).json({ error:"not found" });
+  try {
+    const token=tokenFromRequest(req); const user=token?await getUserByToken(token):undefined;
+    if(!user)return res.status(401).json({error:"invalid OpenLeash token"});
+    const requests=normalizeOtlpGenAi(req.body);
+    for(const request of requests) await evaluateAndRecord(request,user);
+    res.status(202).json({accepted:requests.length,enforcement:"observation-only"});
+  } catch(error){next(error);}
 });
 
 app.post("/v1/plugin-runtime/transform", async (req, res, next) => {
@@ -9307,6 +9319,7 @@ async function evaluateAndRecord(
       console.warn("mobile completion notification failed", error);
     });
   }
+  await exportCanonicalEventToOtel(request, decision).catch((error) => console.warn("OTel export failed open", error));
   return {
     decision,
     decisionId: evaluation.rows[0].id,

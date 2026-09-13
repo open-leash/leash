@@ -1,0 +1,33 @@
+name: Connector conformance
+on:
+  pull_request:
+    paths: ["apps/engine/**", "apps/local-proxy/**", "packages/shared/**", "scripts/run-connector-conformance.mjs"]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+jobs:
+  fixtures:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: node scripts/run-connector-conformance.mjs
+      - uses: actions/upload-artifact@v4
+        with: { name: connector-conformance-fixtures, path: connector-conformance-report.json }
+  live:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: node scripts/run-connector-conformance.mjs --live
+        env:
+          CURSOR_ADMIN_API_KEY: ${{ secrets.CONFORMANCE_CURSOR_ADMIN_API_KEY }}
+          CONFORMANCE_PUBLISH_URL: ${{ secrets.CONFORMANCE_PUBLISH_URL }}
+          CONFORMANCE_PUBLISH_TOKEN: ${{ secrets.CONFORMANCE_PUBLISH_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with: { name: connector-conformance-live, path: connector-conformance-report.json }
