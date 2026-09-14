@@ -48,16 +48,36 @@ jobs:
           npm run test -w @openleash/desktop-client
           npm run build -w @openleash/desktop-client
 
-      - name: Rebuild native dependency and package unsigned NSIS installer
+      - name: Require production Windows signing credentials
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CSC_LINK)) {
+            throw "WINDOWS_CSC_LINK is required; stable Windows releases must be Authenticode signed"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)) {
+            throw "WINDOWS_CSC_KEY_PASSWORD is required; stable Windows releases must be Authenticode signed"
+          }
+
+      - name: Rebuild native dependency and package signed NSIS installer
         working-directory: apps/desktop
         shell: pwsh
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           npx electron-rebuild -v 43.3.0 -w better-sqlite3 --force
           npx electron-builder --config electron-builder.windows.yml --win --x64 --publish never
           node scripts/verify-packaged-windows.mjs
+          Get-ChildItem release/windows/*.exe | ForEach-Object {
+            $signature = Get-AuthenticodeSignature $_.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Authenticode verification failed for $($_.Name): $($signature.Status)"
+            }
+          }
 
       - name: Create checksums
         working-directory: apps/desktop/release/windows
