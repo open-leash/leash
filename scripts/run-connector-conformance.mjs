@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 
 const live=process.argv.includes("--live");
 const commands=[
+  ["npm",["run","build","-w","@openleash/shared"]],
   ["npm",["test","-w","@openleash/client-api"]],
   ["cargo",["test","--manifest-path","apps/local-proxy/Cargo.toml"]],
 ];
